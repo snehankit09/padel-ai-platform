@@ -1,0 +1,187 @@
+{
+  "match_a_ready": {
+    "video_id": "4d3a651f-348b-4c1a-b112-8f839bc7cc95",
+    "match_id": "873c4c0a-830a-48c5-965d-01d9a024225a",
+    "status": "queued",
+    "original_filename": "sample.mp4"
+  },
+  "match_b_blank": {
+    "video_id": "da9269fa-a1ad-4642-97c1-5e9c1822d7c1",
+    "match_id": "36ae066a-8bfb-44f5-8495-eee180f0339b",
+    "status": "queued",
+    "original_filename": "sample.mp4"
+  },
+  "match_c_failed": {
+    "video_id": "07545fcb-f922-4697-8307-b7c02a57fc6c",
+    "match_id": "13f1adc5-b229-4863-95e7-ad7d82e5f014",
+    "status": "queued",
+    "original_filename": "sample.mp4"
+  },
+  "media_checks": [
+    {
+      "path": "/home/claude/project/padel-ai-platform/storage/clips/4d3a651f-348b-4c1a-b112-8f839bc7cc95/clip_000.mp4",
+      "ok": true,
+      "has_video": true,
+      "has_audio": true,
+      "duration_s": 10.021333
+    },
+    {
+      "path": "/home/claude/project/padel-ai-platform/storage/clips/4d3a651f-348b-4c1a-b112-8f839bc7cc95/clip_001.mp4",
+      "ok": true,
+      "has_video": true,
+      "has_audio": true,
+      "duration_s": 4.021333
+    },
+    {
+      "path": "/home/claude/project/padel-ai-platform/storage/clips/4d3a651f-348b-4c1a-b112-8f839bc7cc95/clip_002.mp4",
+      "ok": true,
+      "has_video": true,
+      "has_audio": true,
+      "duration_s": 6.021333
+    },
+    {
+      "path": "/home/claude/project/padel-ai-platform/storage/clips/4d3a651f-348b-4c1a-b112-8f839bc7cc95/clip_003.mp4",
+      "ok": true,
+      "has_video": true,
+      "has_audio": true,
+      "duration_s": 5.021333
+    },
+    {
+      "path": "/home/claude/project/padel-ai-platform/storage/reels/4d3a651f-348b-4c1a-b112-8f839bc7cc95/reel.mp4",
+      "ok": true,
+      "has_video": true,
+      "has_audio": true,
+      "duration_s": 26.658667
+    }
+  ],
+  "api_checks": [
+    {
+      "label": "GET /matches",
+      "url": "http://localhost:8000/matches",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "match_count": 3
+      }
+    },
+    {
+      "label": "GET /matches/{A (ready)}",
+      "url": "http://localhost:8000/matches/873c4c0a-830a-48c5-965d-01d9a024225a",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "video_status": "done",
+        "highlight_count": 4
+      }
+    },
+    {
+      "label": "GET /matches/{A (ready)}/statistics",
+      "url": "http://localhost:8000/matches/873c4c0a-830a-48c5-965d-01d9a024225a/statistics",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "statistic_count": 4
+      }
+    },
+    {
+      "label": "GET /matches/{A (ready)}/reel",
+      "url": "http://localhost:8000/matches/873c4c0a-830a-48c5-965d-01d9a024225a/reel",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "status": "ready",
+        "clip_count": 4
+      }
+    },
+    {
+      "label": "GET /matches/{B (blank)}",
+      "url": "http://localhost:8000/matches/36ae066a-8bfb-44f5-8495-eee180f0339b",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "video_status": "queued",
+        "highlight_count": 0
+      }
+    },
+    {
+      "label": "GET /matches/{B (blank)}/statistics",
+      "url": "http://localhost:8000/matches/36ae066a-8bfb-44f5-8495-eee180f0339b/statistics",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "statistic_count": 0
+      }
+    },
+    {
+      "label": "GET /matches/{B (blank)}/reel",
+      "url": "http://localhost:8000/matches/36ae066a-8bfb-44f5-8495-eee180f0339b/reel",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "status": null,
+        "clip_count": 0
+      }
+    },
+    {
+      "label": "GET /matches/{C (failed)}",
+      "url": "http://localhost:8000/matches/13f1adc5-b229-4863-95e7-ad7d82e5f014",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "video_status": "failed",
+        "highlight_count": 0
+      }
+    },
+    {
+      "label": "GET /matches/{C (failed)}/statistics",
+      "url": "http://localhost:8000/matches/13f1adc5-b229-4863-95e7-ad7d82e5f014/statistics",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "statistic_count": 0
+      }
+    },
+    {
+      "label": "GET /matches/{C (failed)}/reel",
+      "url": "http://localhost:8000/matches/13f1adc5-b229-4863-95e7-ad7d82e5f014/reel",
+      "status": 200,
+      "ok": true,
+      "body_summary": {
+        "status": null,
+        "clip_count": 0
+      }
+    }
+  ],
+  "frontend_checks": [
+    {
+      "label": "home",
+      "url": "http://localhost:3000/",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "label": "matches list",
+      "url": "http://localhost:3000/matches",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "label": "match A detail",
+      "url": "http://localhost:3000/matches/873c4c0a-830a-48c5-965d-01d9a024225a",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "label": "match B detail",
+      "url": "http://localhost:3000/matches/36ae066a-8bfb-44f5-8495-eee180f0339b",
+      "status": 200,
+      "ok": true
+    },
+    {
+      "label": "match C detail",
+      "url": "http://localhost:3000/matches/13f1adc5-b229-4863-95e7-ad7d82e5f014",
+      "status": 200,
+      "ok": true
+    }
+  ]
+}

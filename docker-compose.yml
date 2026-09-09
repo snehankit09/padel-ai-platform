@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  # Relational database — stores Users, Matches, Videos, Highlights, Reels,
+  # Players, Statistics, Predictions, Reports (see PRD Section 11)
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: padel
+      POSTGRES_PASSWORD: padel
+      POSTGRES_DB: padel_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U padel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Job queue + broker for the async video-processing pipeline.
+  # Also doubles as a cache later if we need one.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # FastAPI application: handles upload, auth, and serves results via REST API
+  backend:
+    build: ./backend
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./storage:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery worker: runs the actual CV/ML pipeline stages in the background,
+  # so uploads don't block on hours of video processing (PRD Section 6, Reliability/Performance NFRs)
+  worker:
+    build: ./backend
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - ./ml:/ml
+      - ./storage:/storage
+    depends_on:
+      - redis
+      - postgres
+    command: celery -A app.workers.celery_app worker --loglevel=info
+
+volumes:
+  postgres_data:

@@ -1,0 +1,34 @@
+# --- Web framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# --- Settings & validation ---
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# --- Database ---
+sqlalchemy==2.0.35
+asyncpg==0.29.0        # async driver, used by the FastAPI app
+psycopg2-binary==2.9.9  # sync driver, used by Celery workers (see core/database.py)
+alembic==1.13.2
+
+# --- Async job queue (runs the CV pipeline outside the request/response cycle) ---
+celery==5.4.0
+redis==5.0.8
+
+# --- File / video handling ---
+python-multipart==0.0.9   # required by FastAPI for file uploads
+ffmpeg-python==0.2.0
+
+# --- CV/ML (ml/detection — Part 5b, ml/tracking — Part 6a) ---
+# Only needed by the `worker` container (ml/ isn't mounted into `backend`,
+# see app/core/ml_path.py), but kept in this shared requirements.txt since
+# both containers build from the same Dockerfile/image today.
+ultralytics==8.3.28   # YOLO model loading + inference
+numpy==1.26.4
+scipy==1.14.1          # linear_sum_assignment (Hungarian algorithm) — ml/tracking/byte_tracker.py
+opencv-python-headless==4.10.0.84   # headless: worker has no display, avoids pulling in GUI deps
+
+# --- Testing ---
+pytest==8.3.3
+httpx==0.27.2
