@@ -31,6 +31,14 @@ class Highlight(Base, TimestampedBase):
     # Path to the trimmed clip file, once Module 3's clip generation step runs
     clip_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
+    # Path to this clip's single-frame poster image — Highlights Improvement
+    # Roadmap Tier 1a. Same lifecycle as clip_file_path: NULL until Part 8b
+    # (app/services/clip_extraction_stage.py) successfully extracts one, and
+    # a clip whose extraction failed leaves both this and clip_file_path
+    # unset rather than one succeeding without the other, since both come
+    # from the same try/except block in that stage.
+    thumbnail_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
     match: Mapped["Match"] = relationship(back_populates="highlights")
 
     def __repr__(self) -> str:

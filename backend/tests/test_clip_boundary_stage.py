@@ -37,6 +37,10 @@ class _FakeSettings:
     clip_pre_roll_s: float = 3.0
     clip_post_roll_s: float = 2.0
     clip_min_duration_s: float = 5.0
+    clip_powerful_smash_pre_roll_s: float = 2.0
+    clip_powerful_smash_post_roll_s: float = 3.0
+    clip_long_rally_pre_roll_s: float = 4.0
+    clip_long_rally_post_roll_s: float = 2.0
 
 
 @pytest.fixture
@@ -115,11 +119,18 @@ def test_computes_and_persists_padded_clip_boundaries(sqlite_session, storage_en
 
     assert written["clip_count"] == 2
     boundaries = {b["rally_index"]: b for b in written["clip_boundaries"]}
-    assert boundaries[1]["start_time_s"] == 17.0
+    # rally_index=1 is a long_rally (default highlight_type in
+    # _highlight_event_dict): 4.0s pre-roll / 2.0s post-roll per
+    # settings.clip_long_rally_pre_roll_s/clip_long_rally_post_roll_s.
+    assert boundaries[1]["start_time_s"] == 16.0
     assert boundaries[1]["end_time_s"] == 32.0
-    # instantaneous event still gets padded out to at least the minimum
+    # rally_index=2 is a powerful_smash, instantaneous (50.0, 50.0): its
+    # own 2.0s pre-roll + 3.0s post-roll already sum to the same 5.0s
+    # floor the old uniform 3.0/2.0 padding produced.
     assert (boundaries[2]["end_time_s"] - boundaries[2]["start_time_s"]) == 5.0
     assert written["video_duration_s"] == 100.0
+    assert written["clip_padding_by_type"]["powerful_smash"] == {"pre_roll_s": 2.0, "post_roll_s": 3.0}
+    assert written["clip_padding_by_type"]["long_rally"] == {"pre_roll_s": 4.0, "post_roll_s": 2.0}
 
 
 def test_no_highlight_events_still_writes_an_empty_result(sqlite_session, storage_env):

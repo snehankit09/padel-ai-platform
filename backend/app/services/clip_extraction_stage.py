@@ -67,13 +67,25 @@ from sqlalchemy import select
 
 from app.core.database import get_sync_db
 from app.core.ml_path import ensure_ml_importable
+from app.core.config import get_settings
 from app.models.highlight import Highlight
 from app.models.video import Video
-from app.services.storage import get_storage_service, make_clip_file_destination_path
+from app.services.storage import (
+    get_storage_service,
+    make_clip_file_destination_path,
+    make_clip_thumbnail_destination_path,
+)
 
 logger = logging.getLogger(__name__)
 
 _HIGHLIGHT_LABEL_SEPARATOR = " "
+
+# Highlights Improvement Roadmap Tier 1b: only these two types have a
+# real decisive contact frame (HighlightEvent.source_frame_index —
+# ml/pipeline/highlight_tagging.py) to center a slow-motion window on.
+# LONG_RALLY/FAST_EXCHANGES have no single such moment, so slow-motion
+# isn't attempted for them regardless of settings.enable_highlight_slowmo.
+_SLOWMO_ELIGIBLE_HIGHLIGHT_TYPES = {"powerful_smash", "spectacular_save"}
 
 
 def _format_highlight_label(highlight_type: str) -> str:
@@ -85,6 +97,42 @@ def _format_highlight_label(highlight_type: str) -> str:
     not a value this stage needs to validate against the enum itself.
     """
     return highlight_type.replace("_", _HIGHLIGHT_LABEL_SEPARATOR).upper()
+
+
+def _thumbnail_timestamp_s(boundary: dict, sample_fps: float | None) -> float:
+    """
+    Picks which moment within a clip's padded window to grab a poster
+    frame from — Highlights Improvement Roadmap Tier 1a.
+
+    Prefers `source_frame_index` (set on POWERFUL_SMASH and
+    SPECTACULAR_SAVE ClipBoundaries — see ml/pipeline/highlight_tagging.py's
+    HighlightEvent.source_frame_index) converted to an absolute video
+    timestamp via `sample_fps`, the same frame-index -> seconds conversion
+    ml/pipeline/highlight_tagging.py's own _frame_time_s uses. That's the
+    actual decisive contact frame — a far better poster image than an
+    arbitrary point in the clip. LONG_RALLY and FAST_EXCHANGES boundaries
+    don't carry a source_frame_index (no single decisive frame exists for
+    those types), so this falls back to the padded window's midpoint;
+    `sample_fps` missing from the payload (shouldn't happen, but this
+    stage has no reason to trust it blindly) falls back the same way.
+
+    Clamped to [start_time_s, end_time_s) either way, with a small margin
+    off the very end: a source_frame_index is always inside the *tight*
+    window it came from, which is itself always inside the padded window
+    this function receives, but landing an `-ss` seek exactly on or past
+    a short clip's last frame is the kind of edge case worth a cheap
+    guard rather than trusting the invariant to always hold.
+    """
+    start_s = boundary["start_time_s"]
+    end_s = boundary["end_time_s"]
+
+    source_frame_index = boundary.get("source_frame_index")
+    if source_frame_index is not None and sample_fps:
+        timestamp_s = source_frame_index / sample_fps
+    else:
+        timestamp_s = (start_s + end_s) / 2
+
+    return min(max(timestamp_s, start_s), max(end_s - 0.01, start_s))
 
 
 class ClipExtractionStageError(Exception):
@@ -180,7 +228,16 @@ def run_clip_extraction(payload: dict) -> None:
     )
 
     ensure_ml_importable()
-    from ml.common.clip_extraction import ClipExtractionError, extract_clip  # deferred — see frame_extraction_stage.py
+    from ml.common.clip_extraction import (  # deferred — see frame_extraction_stage.py
+        ClipExtractionError,
+        SlowMotionWindowError,
+        extract_clip,
+        extract_clip_with_slowmo,
+        extract_thumbnail,
+    )
+
+    settings = get_settings()
+    sample_fps = payload.get("frame_sample_fps")
 
     # One short, read-only session to build the tight-window -> highlight_id
     # lookup (same matching key as before — see module docstring), separate
@@ -220,16 +277,66 @@ def run_clip_extraction(payload: dict) -> None:
 
         clip_key = make_clip_file_destination_path(video_uuid, index)
         clip_path = storage.get_local_path(clip_key)
+        label_text = _format_highlight_label(boundary["highlight_type"])
+
+        # Highlights Improvement Roadmap Tier 1b: attempt a slow-motion
+        # version first when this highlight type has a real decisive
+        # frame, the feature is turned on, and we actually know
+        # sample_fps (needed to convert source_frame_index into an
+        # absolute video timestamp). Any reason it can't apply — feature
+        # off, wrong type, no source_frame_index, or the window not
+        # fitting this specific clip (SlowMotionWindowError) — falls
+        # through to the exact same plain extract_clip() call as before,
+        # not a failure: slow-motion is a bonus treatment, never a
+        # requirement for a clip to count as extracted.
+        slowmo_center_s = None
+        if (
+            settings.enable_highlight_slowmo
+            and boundary["highlight_type"] in _SLOWMO_ELIGIBLE_HIGHLIGHT_TYPES
+            and boundary.get("source_frame_index") is not None
+            and sample_fps
+        ):
+            slowmo_center_s = boundary["source_frame_index"] / sample_fps
 
         try:
-            extract_clip(
-                source_path=source_path,
-                output_path=clip_path,
-                start_time_s=boundary["start_time_s"],
-                end_time_s=boundary["end_time_s"],
-                label_text=_format_highlight_label(boundary["highlight_type"]),
-            )
+            if slowmo_center_s is not None:
+                try:
+                    extract_clip_with_slowmo(
+                        source_path=source_path,
+                        output_path=clip_path,
+                        start_time_s=boundary["start_time_s"],
+                        end_time_s=boundary["end_time_s"],
+                        slowmo_center_s=slowmo_center_s,
+                        slowmo_window_s=settings.highlight_slowmo_window_s,
+                        slowmo_factor=settings.highlight_slowmo_factor,
+                        label_text=label_text,
+                    )
+                except SlowMotionWindowError as exc:
+                    logger.info(
+                        "[analyze] video_id=%s clip %d/%d: slow-motion window didn't fit "
+                        "(rally_index=%s highlight_type=%r), falling back to a plain clip: %s",
+                        video_id, index + 1, len(boundaries), boundary.get("rally_index"),
+                        boundary["highlight_type"], exc,
+                    )
+                    extract_clip(
+                        source_path=source_path,
+                        output_path=clip_path,
+                        start_time_s=boundary["start_time_s"],
+                        end_time_s=boundary["end_time_s"],
+                        label_text=label_text,
+                    )
+            else:
+                extract_clip(
+                    source_path=source_path,
+                    output_path=clip_path,
+                    start_time_s=boundary["start_time_s"],
+                    end_time_s=boundary["end_time_s"],
+                    label_text=label_text,
+                )
         except ClipExtractionError as exc:
+            # (thumbnail extraction below only runs once the clip itself
+            # has already succeeded — see that block's own comment for why
+            # a thumbnail failure doesn't reach this except clause)
             logger.warning(
                 "[analyze] video_id=%s clip %d/%d failed (rally_index=%s highlight_type=%r), "
                 "leaving this Highlight row's clip_file_path unset and moving on: %s",
@@ -241,6 +348,34 @@ def run_clip_extraction(payload: dict) -> None:
             )
             continue
 
+        # Thumbnail extraction — Highlights Improvement Roadmap Tier 1a.
+        # Deliberately a soft failure: this only runs once the real clip
+        # has already succeeded above, and a missing poster image is a
+        # strictly smaller problem than a missing clip (the frontend's
+        # existing placeholder fallback still applies), so it doesn't
+        # belong in `failures` — that list drives this stage's own
+        # retry/fail decision (see this function's docstring, "every
+        # single boundary failing" is what makes this stage raise), and a
+        # thumbnail-only failure shouldn't count toward that at all, let
+        # alone cost a clip that already extracted fine its persistence.
+        thumbnail_key: str | None = None
+        try:
+            thumbnail_key = make_clip_thumbnail_destination_path(video_uuid, index)
+            extract_thumbnail(
+                source_path=source_path,
+                output_path=storage.get_local_path(thumbnail_key),
+                timestamp_s=_thumbnail_timestamp_s(boundary, sample_fps),
+            )
+        except ClipExtractionError as exc:
+            logger.warning(
+                "[analyze] video_id=%s clip %d/%d: thumbnail extraction failed "
+                "(rally_index=%s highlight_type=%r), leaving this Highlight row's "
+                "thumbnail_file_path unset — clip itself still extracted fine: %s",
+                video_id, index + 1, len(boundaries), boundary.get("rally_index"),
+                boundary["highlight_type"], exc,
+            )
+            thumbnail_key = None
+
         # Its own session, separate from both the read above and every
         # other boundary's iteration — see this function's docstring for
         # why: a later boundary's failure (extraction or otherwise) can
@@ -251,6 +386,7 @@ def run_clip_extraction(payload: dict) -> None:
             highlight.start_time_seconds = boundary["start_time_s"]
             highlight.end_time_seconds = boundary["end_time_s"]
             highlight.clip_file_path = clip_key
+            highlight.thumbnail_file_path = thumbnail_key
             db.commit()
         extracted_count += 1
 

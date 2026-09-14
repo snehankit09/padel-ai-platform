@@ -137,6 +137,13 @@ _AUDIO_BITRATE = "128k"
 # download — see the module docstring's "Part 8c" section.
 _MOVFLAGS = "+faststart"
 
+# Slow-motion (Highlights Improvement Roadmap Tier 1b): the minimum
+# length either normal-speed side segment needs to be worth splitting out
+# at all. Below this, a "slowed window near the very edge of the clip"
+# isn't meaningfully different from "the whole clip is slow, with a tiny
+# fast sliver at one end" — see build_ffmpeg_slowmo_clip_command.
+_SLOWMO_MIN_SEGMENT_S = 0.2
+
 # --- Highlight-type label overlay (Part 8d) ---------------------------------
 # A fixed font *file* path, not a fontconfig family name lookup
 # (`font='DejaVu Sans Bold'`) — the worker container is a slim base image
@@ -381,6 +388,280 @@ def extract_clip(
             f"ffmpeg produced no playable output for {source_path!r} "
             f"[{start_time_s:.3f}s - {end_time_s:.3f}s] — the requested window is likely "
             "outside the source video's actual duration"
+        )
+
+    return ClipExtractionResult(
+        output_path=output_path,
+        start_time_s=start_time_s,
+        end_time_s=end_time_s,
+        duration_s=end_time_s - start_time_s,
+        file_size_bytes=os.path.getsize(output_path),
+    )
+
+
+def build_ffmpeg_thumbnail_command(source_path: str, output_path: str, timestamp_s: float) -> list[str]:
+    """
+    Pure command-builder for a single-frame poster image — Highlights
+    Improvement Roadmap Tier 1a — same "no subprocess, no filesystem
+    access" split as build_ffmpeg_clip_command above, for the same
+    testability reason.
+
+    Reuses `_scale_filter` (Part 8c) unmodified so a thumbnail is capped
+    to the exact same resolution ceiling as the clip it belongs to,
+    rather than introducing a second, independent sizing decision this
+    module would then have to keep in sync by hand.
+
+    `-ss` before `-i` for the same frame-accurate-seek reason
+    build_ffmpeg_clip_command uses it (see module docstring); `-frames:v 1`
+    stops the encode after exactly one frame instead of decoding further
+    than necessary. `-q:v 2` is JPEG's own quality knob (2-31, lower is
+    better) — 2 is "visually near-lossless single frame", cheap to afford
+    since this produces one image per clip, not a duration's worth of
+    frames the way frame_extraction.py's _JPEG_QSCALE has to budget for.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-ss", f"{timestamp_s:.3f}",
+        "-i", source_path,
+        "-frames:v", "1",
+        "-vf", _scale_filter(_MAX_OUTPUT_HEIGHT_PX),
+        "-q:v", "2",
+        output_path,
+        "-loglevel", "error",
+    ]
+
+
+def extract_thumbnail(source_path: str, output_path: str, timestamp_s: float) -> None:
+    """
+    Writes a single JPEG frame from `source_path` at `timestamp_s` to
+    `output_path` — Highlights Improvement Roadmap Tier 1a's poster image
+    for one highlight clip. Creates output_path's parent directory if it
+    doesn't exist yet, same as extract_clip does for its own output_path.
+
+    Raises ClipExtractionError under the same conditions extract_clip
+    does (ffmpeg missing/failed, or no playable frame produced) — reusing
+    that one exception type rather than introducing a second, since
+    callers already have to handle ClipExtractionError from extract_clip
+    in the same code path (see clip_extraction_stage.py) and a second,
+    thumbnail-specific exception type would only mean catching two things
+    where one already covers it.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    command = build_ffmpeg_thumbnail_command(source_path, output_path, timestamp_s)
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise ClipExtractionError("ffmpeg is not installed or not on PATH") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        raise ClipExtractionError(
+            f"ffmpeg failed to extract a thumbnail from {source_path!r} "
+            f"at {timestamp_s:.3f}s: {stderr or 'unknown error'}"
+        ) from exc
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        # Same "a past-EOF seek doesn't make ffmpeg exit non-zero" trap
+        # extract_clip's own check guards against — here it'd mean
+        # timestamp_s landed past the source's actual duration.
+        raise ClipExtractionError(
+            f"ffmpeg produced no thumbnail for {source_path!r} at {timestamp_s:.3f}s — "
+            "the requested timestamp is likely outside the source video's actual duration"
+        )
+
+
+def _build_atempo_chain(factor: float) -> str:
+    """
+    ffmpeg's `atempo` filter only accepts a single speed multiplier in
+    [0.5, 2.0] per instance — anything outside that range (our own
+    slow-motion use is well under 0.5, since `highlight_slowmo_factor`
+    defaults to 0.45) has to be reached by chaining multiple `atempo`
+    instances whose multipliers compound to the target factor, the
+    standard workaround for this ffmpeg limitation.
+    """
+    if factor <= 0:
+        raise ValueError(f"atempo factor must be positive, got {factor!r}")
+    filters: list[str] = []
+    remaining = factor
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    filters.append(f"atempo={remaining:.6f}")
+    return ",".join(filters)
+
+
+class SlowMotionWindowError(ValueError):
+    """
+    Raised when a requested slow-motion window doesn't leave enough real
+    clip on both sides to be worth the added filter-graph complexity —
+    e.g. a very short clip, or a decisive-frame timestamp too close to
+    one edge. Callers (clip_extraction_stage.py) should catch this and
+    fall back to a plain extract_clip() call rather than treating it as a
+    hard failure — same "a clip is still better than no clip" posture
+    Part 8f already established for extraction failures generally.
+    """
+
+
+def build_ffmpeg_slowmo_clip_command(
+    source_path: str,
+    output_path: str,
+    start_time_s: float,
+    end_time_s: float,
+    slowmo_center_s: float,
+    slowmo_window_s: float,
+    slowmo_factor: float,
+    label_text: str | None = None,
+) -> list[str]:
+    """
+    Highlights Improvement Roadmap Tier 1b — builds a three-segment
+    filter-graph command: normal speed, then a `slowmo_window_s`-wide
+    window centered on `slowmo_center_s` (an ABSOLUTE video timestamp,
+    same convention as start_time_s/end_time_s — converted to
+    clip-relative internally) played back at `slowmo_factor` of real-time,
+    then normal speed again.
+
+    **Why three segments via trim+setpts+concat, not a single setpts
+    expression over the whole clip.** `setpts` applies one constant
+    multiplier to a stream's presentation timestamps — there's no
+    "slow down only between t1 and t2" mode built into the filter itself.
+    Three `trim`'d sub-streams, each re-based to start at PTS=0
+    (`setpts=PTS-STARTPTS`) so they splice back together without gaps,
+    then `concat`, is the standard ffmpeg pattern for a variable-speed
+    single output. Audio gets the matching treatment: `atrim` + `atempo`
+    (via `_build_atempo_chain`, since our target factor is outside
+    atempo's own single-instance range) + `concat` with paired video/audio
+    streams so playback stays in sync.
+
+    **This does not itself decide whether slow motion will look good.**
+    See settings.enable_highlight_slowmo's own comment in core/config.py
+    for the real risk (choppy playback on typical source frame rates) —
+    this function just builds the command faithfully; judging the output
+    is on whoever turns the feature on.
+
+    Raises SlowMotionWindowError if the computed window doesn't leave a
+    real segment on at least one side — see that exception's docstring.
+    """
+    if end_time_s <= start_time_s:
+        raise ValueError(f"end_time_s ({end_time_s!r}) must be greater than start_time_s ({start_time_s!r})")
+    if slowmo_factor <= 0 or slowmo_factor >= 1:
+        raise ValueError(f"slowmo_factor must be in (0, 1), got {slowmo_factor!r}")
+
+    duration_s = end_time_s - start_time_s
+    center_rel_s = slowmo_center_s - start_time_s
+    half_window_s = slowmo_window_s / 2
+
+    t1 = max(0.0, center_rel_s - half_window_s)
+    t2 = min(duration_s, center_rel_s + half_window_s)
+
+    if t2 - t1 < 0.05 or (t1 < _SLOWMO_MIN_SEGMENT_S and duration_s - t2 < _SLOWMO_MIN_SEGMENT_S):
+        raise SlowMotionWindowError(
+            f"slow-motion window [{t1:.3f}s, {t2:.3f}s] leaves no meaningful "
+            f"normal-speed segment within a {duration_s:.3f}s clip"
+        )
+
+    video_labels: list[str] = []
+    audio_labels: list[str] = []
+    filter_parts: list[str] = []
+    segments = [(0.0, t1, 1.0), (t1, t2, slowmo_factor), (t2, duration_s, 1.0)]
+
+    for index, (seg_start, seg_end, speed) in enumerate(segments):
+        if seg_end - seg_start < 0.01:
+            continue  # degenerate edge segment (window touches a clip boundary) — skip it entirely
+        v_label = f"sv{index}"
+        a_label = f"sa{index}"
+        pts_multiplier = 1.0 / speed
+        filter_parts.append(
+            f"[0:v]trim={seg_start:.3f}:{seg_end:.3f},setpts=(PTS-STARTPTS)*{pts_multiplier:.6f}[{v_label}]"
+        )
+        atempo = "" if speed == 1.0 else f",{_build_atempo_chain(speed)}"
+        filter_parts.append(f"[0:a]atrim={seg_start:.3f}:{seg_end:.3f},asetpts=PTS-STARTPTS{atempo}[{a_label}]")
+        video_labels.append(f"[{v_label}]")
+        audio_labels.append(f"[{a_label}]")
+
+    concat_inputs = "".join(f"{v}{a}" for v, a in zip(video_labels, audio_labels))
+    filter_parts.append(f"{concat_inputs}concat=n={len(video_labels)}:v=1:a=1[vcat][acat]")
+    filter_parts.append(f"[vcat]{_build_video_filter(_MAX_OUTPUT_HEIGHT_PX, label_text)}[vout]")
+
+    return [
+        "ffmpeg", "-y",
+        "-i", source_path,
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[vout]",
+        "-map", "[acat]",
+        "-c:v", _VIDEO_CODEC,
+        "-preset", _VIDEO_PRESET,
+        "-crf", _VIDEO_CRF,
+        "-pix_fmt", _PIXEL_FORMAT,
+        "-c:a", _AUDIO_CODEC,
+        "-ar", _AUDIO_SAMPLE_RATE_HZ,
+        "-ac", _AUDIO_CHANNELS,
+        "-b:a", _AUDIO_BITRATE,
+        "-movflags", _MOVFLAGS,
+        output_path,
+        "-loglevel", "error",
+    ]
+
+
+def extract_clip_with_slowmo(
+    source_path: str,
+    output_path: str,
+    start_time_s: float,
+    end_time_s: float,
+    slowmo_center_s: float,
+    slowmo_window_s: float,
+    slowmo_factor: float,
+    label_text: str | None = None,
+) -> ClipExtractionResult:
+    """
+    Same contract as extract_clip (frame-accurate window, re-encoded,
+    same normalization, raises ClipExtractionError on failure), but
+    produces a clip with a slowed window around `slowmo_center_s` — see
+    build_ffmpeg_slowmo_clip_command's docstring for the technique and its
+    real quality tradeoff.
+
+    **Not input-seeked the way extract_clip is.** extract_clip places
+    `-ss` before `-i` for a fast, frame-accurate seek directly to
+    start_time_s — safe there because that whole window plays at one
+    constant speed. Here, the filter graph itself needs frame-accurate
+    `trim` points at THREE different offsets (0, t1, t2) within the
+    requested window, which requires decoding from the start of that
+    window forward; input-seeking first would shift what "0" means
+    inside the filter graph's own trim math in a way that's easy to get
+    subtly wrong. The practical cost: this decodes the full
+    [start_time_s, end_time_s] span itself (a few seconds, per Part 8a's
+    padding) rather than skipping to it — not the multi-minute source
+    file scan input-seeking avoids elsewhere in this module.
+
+    Raises SlowMotionWindowError (a ValueError) if the window doesn't fit
+    this clip — see build_ffmpeg_slowmo_clip_command. Callers should treat
+    that the same as a soft failure and fall back to plain extract_clip(),
+    not as this clip failing to extract at all.
+    """
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    command = build_ffmpeg_slowmo_clip_command(
+        source_path, output_path, start_time_s, end_time_s,
+        slowmo_center_s=slowmo_center_s, slowmo_window_s=slowmo_window_s,
+        slowmo_factor=slowmo_factor, label_text=label_text,
+    )
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise ClipExtractionError("ffmpeg is not installed or not on PATH") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        raise ClipExtractionError(
+            f"ffmpeg failed to extract a slow-motion clip from {source_path!r} "
+            f"[{start_time_s:.3f}s - {end_time_s:.3f}s]: {stderr or 'unknown error'}"
+        ) from exc
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0 or not _has_video_stream(output_path):
+        raise ClipExtractionError(
+            f"ffmpeg produced no playable slow-motion output for {source_path!r} "
+            f"[{start_time_s:.3f}s - {end_time_s:.3f}s]"
         )
 
     return ClipExtractionResult(

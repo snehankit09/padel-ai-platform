@@ -250,19 +250,56 @@ class Settings(BaseSettings):
 
     # --- Clip boundary calculation (Part 8a) ---
     # See ml/pipeline/clip_boundaries.py's module docstring for the full
-    # reasoning, including why the same padding applies to every
-    # HighlightType rather than needing its own per-type setting.
-    #   - clip_pre_roll_s / clip_post_roll_s: seconds of lead-up added
-    #     before, and follow-through added after, each HighlightEvent's
-    #     own tight start_time_s/end_time_s (Part 7e) before it's clamped
-    #     to the video's own duration.
-    #   - clip_min_duration_s: floor on the final, padded-and-clamped
-    #     clip duration — only ever has to do real work when clamping
-    #     against the start or end of the video ate into one side's
-    #     padding (see _expand_to_min_duration).
+    # reasoning, including per-HighlightType padding (Part 8a's "1c"
+    # follow-up — see the highlight-clips roadmap).
+    #   - clip_pre_roll_s / clip_post_roll_s: fallback seconds of lead-up
+    #     added before, and follow-through added after, each
+    #     HighlightEvent's own tight start_time_s/end_time_s (Part 7e)
+    #     before it's clamped to the video's own duration — used for any
+    #     HighlightType without its own override below (currently
+    #     fast_exchange and spectacular_save).
+    #   - clip_min_duration_s: no longer force-applied uniformly — the
+    #     floor on each clip's final, padded-and-clamped duration is now
+    #     derived per-event from whichever pre/post-roll actually applied
+    #     to it (see clip_boundaries.compute_clip_boundary). Left here,
+    #     unused by the stage, only so the historical 3.0 + 2.0 = 5.0
+    #     relationship stays documented in one place.
+    #   - clip_<type>_pre_roll_s / clip_<type>_post_roll_s: per-
+    #     HighlightType overrides. A smash gets a shorter lead-in (the
+    #     contact itself is the payoff) and longer follow-through (let the
+    #     reaction land); a long rally gets a longer lead-in so the
+    #     buildup before the point turns highlight-worthy has room to
+    #     register.
     clip_pre_roll_s: float = 3.0
     clip_post_roll_s: float = 2.0
     clip_min_duration_s: float = 5.0
+    clip_powerful_smash_pre_roll_s: float = 2.0
+    clip_powerful_smash_post_roll_s: float = 3.0
+    clip_long_rally_pre_roll_s: float = 4.0
+    clip_long_rally_post_roll_s: float = 2.0
+
+    # --- Highlight clip slow-motion (Highlights Improvement Roadmap Tier 1b) ---
+    # Defaults to OFF on purpose. Whether this looks good depends entirely
+    # on the source video's actual native frame rate: a 25-30fps source
+    # (typical for a phone/court-side camera, not broadcast-grade high-
+    # frame-rate capture) has no extra real frames to reveal when slowed
+    # down via setpts — it just holds each existing frame longer, which
+    # can read as choppy/stuttery rather than smooth, especially on the
+    # fastest-moving thing in frame (a smash, a diving save) — exactly the
+    # two highlight types this targets. Turn this on and watch a handful
+    # of real output clips before deciding it should stay on; don't assume
+    # it's a clear win the way the thumbnail feature (Tier 1a) is.
+    #   - enable_highlight_slowmo: master on/off switch.
+    #   - highlight_slowmo_window_s: total width of the slowed window,
+    #     centered on the highlight's decisive frame (HighlightEvent.
+    #     source_frame_index — only set on POWERFUL_SMASH/SPECTACULAR_SAVE,
+    #     see ml/pipeline/highlight_tagging.py). The clip plays at normal
+    #     speed everywhere outside this window.
+    #   - highlight_slowmo_factor: playback speed during that window, as a
+    #     fraction of real-time (0.45 = roughly 2.2x slower than normal).
+    enable_highlight_slowmo: bool = False
+    highlight_slowmo_window_s: float = 1.0
+    highlight_slowmo_factor: float = 0.45
 
     # --- Reel clip selection (Part 10a) ---
     # See ml/pipeline/reel_selection.py's module docstring for the full

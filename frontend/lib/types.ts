@@ -77,6 +77,10 @@ export type HighlightType =
 // across types — see that schema's own docstring. clip_url is null
 // whenever the clip hasn't been extracted yet (or failed to extract) for
 // this highlight, not just when the match overall isn't done processing.
+// thumbnail_url follows the same null-until-extracted convention
+// independently of clip_url — a clip can have one set without the other,
+// since thumbnail extraction is a soft failure server-side (see
+// HighlightItem's own docstring in schemas/match.py).
 export interface HighlightItem {
   id: string;
   event_type: HighlightType;
@@ -84,6 +88,7 @@ export interface HighlightItem {
   end_time_seconds: number;
   importance_score: number;
   clip_url: string | null;
+  thumbnail_url: string | null;
 }
 
 // Mirrors app/schemas/match.py's MatchDetailResponse — GET /matches/{id}.

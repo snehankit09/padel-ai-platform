@@ -14,18 +14,27 @@ real clip in/out point — pre-roll before it, post-roll after it, clamped
 to the video's own [0, duration] so a highlight near the very start or
 end of the match doesn't request a timestamp that doesn't exist.
 
-**Why uniform padding, not per-HighlightType padding.** It might seem
-like a whole-rally LONG_RALLY event (already several seconds of real
-action) needs less added lead-up than a single-instant POWERFUL_SMASH
-contact does. But that difference is already baked into each event's own
-tight boundaries by Part 7e — a LONG_RALLY's start_time_s is the rally's
-own start (already includes the serve and the build-up), while a
-POWERFUL_SMASH's start_time_s is just the contact frame. Applying the
-*same* pre_roll_s/post_roll_s on top of each event's own type-appropriate
-tight window already produces a type-appropriate final clip, without
-this module needing to know anything about what each HighlightType means
-— same layering split as Part 7e leaving "is this highlight-worthy" to
-itself rather than duplicating Part 7a-7d's own logic.
+**Why per-HighlightType padding (not uniform).** Originally this module
+applied the same pre_roll_s/post_roll_s to every event on the theory that
+each HighlightType's own tight window (Part 7e) already bakes in its
+type-appropriate context — a LONG_RALLY's start_time_s already includes
+the serve and build-up, so it "needs less" added lead-up than a single-
+instant POWERFUL_SMASH contact. In practice that's not quite true in the
+other direction: a smash reads better with a *shorter* lead-in (the
+contact itself is the payoff, not the windup) and a *longer* follow-
+through (let the viewer see the reaction land), while a long rally
+benefits from *more* lead-in than the default so the actual build-up
+before the point turns highlight-worthy has room to register, not just
+the point's own start. CLIP_PADDING_BY_HIGHLIGHT_TYPE below encodes those
+per-type adjustments; any HighlightType not listed there (currently
+FAST_EXCHANGE and SPECTACULAR_SAVE) falls back to the same
+DEFAULT_CLIP_PRE_ROLL_S/DEFAULT_CLIP_POST_ROLL_S this module always used,
+so this is an additive change, not a rewrite of the default behavior.
+Callers that already pass an explicit pre_roll_s/post_roll_s (e.g.
+existing tests pinning specific values) still get that value applied
+uniformly, overriding the per-type lookup — the per-type table only
+supplies *defaults* for the "caller didn't ask for something specific"
+case.
 
 **Why a minimum clip duration, separate from the padding itself.** Padded
 duration is normally just tight_duration + pre_roll_s + post_roll_s, but
@@ -55,9 +64,13 @@ and where the video's own duration_seconds lives.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from ml.pipeline.highlight_tagging import HighlightEvent
+from ml.pipeline.highlight_tagging import (
+    HIGHLIGHT_TYPE_LONG_RALLY,
+    HIGHLIGHT_TYPE_POWERFUL_SMASH,
+    HighlightEvent,
+)
 
 # Seconds of lead-up added before the event's own tight start_time_s —
 # enough to let a viewer register "something is about to happen" (the
@@ -79,6 +92,42 @@ DEFAULT_CLIP_POST_ROLL_S = 2.0
 # ever has to do real work when clamping against the video boundary ate
 # into one side — see _expand_to_min_duration.
 DEFAULT_CLIP_MIN_DURATION_S = DEFAULT_CLIP_PRE_ROLL_S + DEFAULT_CLIP_POST_ROLL_S
+
+# Per-HighlightType (pre_roll_s, post_roll_s) overrides — see the module
+# docstring's "Why per-HighlightType padding" section for the reasoning
+# behind each. A HighlightType not present here (currently
+# HIGHLIGHT_TYPE_FAST_EXCHANGE and HIGHLIGHT_TYPE_SPECTACULAR_SAVE) falls
+# back to (DEFAULT_CLIP_PRE_ROLL_S, DEFAULT_CLIP_POST_ROLL_S) via
+# get_padding_for_type — deliberately left at the shared default rather
+# than guessed at, until real footage review (see the roadmap) suggests
+# they need their own tuning too.
+CLIP_PADDING_BY_HIGHLIGHT_TYPE: Mapping[str, tuple[float, float]] = {
+    # Shorter lead-in (the contact itself is the payoff, not the windup),
+    # longer follow-through (let the reaction land).
+    HIGHLIGHT_TYPE_POWERFUL_SMASH: (2.0, 3.0),
+    # Longer lead-in so the buildup before the point turns
+    # highlight-worthy actually registers, not just the rally's own start.
+    HIGHLIGHT_TYPE_LONG_RALLY: (4.0, 2.0),
+}
+
+
+def get_padding_for_type(
+    highlight_type: str,
+    *,
+    padding_by_type: Mapping[str, tuple[float, float]] = CLIP_PADDING_BY_HIGHLIGHT_TYPE,
+    default_pre_roll_s: float = DEFAULT_CLIP_PRE_ROLL_S,
+    default_post_roll_s: float = DEFAULT_CLIP_POST_ROLL_S,
+) -> tuple[float, float]:
+    """
+    (pre_roll_s, post_roll_s) for a given highlight_type — the per-type
+    override from `padding_by_type` if one exists, otherwise
+    (default_pre_roll_s, default_post_roll_s). Exposed as its own function
+    (rather than inlined into compute_clip_boundary) so callers that only
+    need the padding values themselves — e.g. Part 8's later ranking/
+    preview logic, or the verify script's per-boundary flagging — don't
+    need to duplicate this lookup.
+    """
+    return padding_by_type.get(highlight_type, (default_pre_roll_s, default_post_roll_s))
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -157,9 +206,12 @@ def compute_clip_boundary(
     event: HighlightEvent,
     *,
     video_duration_s: float,
-    pre_roll_s: float = DEFAULT_CLIP_PRE_ROLL_S,
-    post_roll_s: float = DEFAULT_CLIP_POST_ROLL_S,
-    min_duration_s: float = DEFAULT_CLIP_MIN_DURATION_S,
+    pre_roll_s: float | None = None,
+    post_roll_s: float | None = None,
+    min_duration_s: float | None = None,
+    padding_by_type: Mapping[str, tuple[float, float]] = CLIP_PADDING_BY_HIGHLIGHT_TYPE,
+    default_pre_roll_s: float = DEFAULT_CLIP_PRE_ROLL_S,
+    default_post_roll_s: float = DEFAULT_CLIP_POST_ROLL_S,
 ) -> ClipBoundary:
     """
     Pads `event`'s tight window by pre_roll_s/post_roll_s, clamps the
@@ -170,16 +222,37 @@ def compute_clip_boundary(
     anything derived from the events themselves: a highlight tagged right
     at the very end of the last rally still needs a real ceiling to clamp
     its post-roll against.
+
+    pre_roll_s/post_roll_s default to None, meaning "look up this event's
+    own HighlightType in padding_by_type" (see get_padding_for_type) —
+    passing an explicit float instead applies that value uniformly,
+    overriding the per-type lookup, same as this function's old
+    always-uniform behavior. min_duration_s similarly defaults to None,
+    meaning "whatever this event's resolved pre_roll_s + post_roll_s add
+    up to" (matching the original DEFAULT_CLIP_MIN_DURATION_S relationship,
+    just computed per-type instead of off the two global constants).
     """
-    raw_start = event.start_time_s - pre_roll_s
-    raw_end = event.end_time_s + post_roll_s
+    type_pre_roll_s, type_post_roll_s = get_padding_for_type(
+        event.highlight_type,
+        padding_by_type=padding_by_type,
+        default_pre_roll_s=default_pre_roll_s,
+        default_post_roll_s=default_post_roll_s,
+    )
+    resolved_pre_roll_s = type_pre_roll_s if pre_roll_s is None else pre_roll_s
+    resolved_post_roll_s = type_post_roll_s if post_roll_s is None else post_roll_s
+    resolved_min_duration_s = (
+        resolved_pre_roll_s + resolved_post_roll_s if min_duration_s is None else min_duration_s
+    )
+
+    raw_start = event.start_time_s - resolved_pre_roll_s
+    raw_end = event.end_time_s + resolved_post_roll_s
 
     start = _clamp(raw_start, 0.0, video_duration_s)
     end = _clamp(raw_end, 0.0, video_duration_s)
     end = max(end, start)  # defends against a pathological video_duration_s < 0
 
     start, end = _expand_to_min_duration(
-        start, end, min_duration_s=min_duration_s, lower_bound=0.0, upper_bound=max(video_duration_s, 0.0)
+        start, end, min_duration_s=resolved_min_duration_s, lower_bound=0.0, upper_bound=max(video_duration_s, 0.0)
     )
 
     return ClipBoundary(
@@ -199,9 +272,12 @@ def compute_clip_boundaries(
     events: Sequence[HighlightEvent],
     *,
     video_duration_s: float,
-    pre_roll_s: float = DEFAULT_CLIP_PRE_ROLL_S,
-    post_roll_s: float = DEFAULT_CLIP_POST_ROLL_S,
-    min_duration_s: float = DEFAULT_CLIP_MIN_DURATION_S,
+    pre_roll_s: float | None = None,
+    post_roll_s: float | None = None,
+    min_duration_s: float | None = None,
+    padding_by_type: Mapping[str, tuple[float, float]] = CLIP_PADDING_BY_HIGHLIGHT_TYPE,
+    default_pre_roll_s: float = DEFAULT_CLIP_PRE_ROLL_S,
+    default_post_roll_s: float = DEFAULT_CLIP_POST_ROLL_S,
 ) -> list[ClipBoundary]:
     """
     Maps compute_clip_boundary across every event, preserving `events`'
@@ -210,6 +286,12 @@ def compute_clip_boundaries(
     caller zipping this output back against `events` (or against the
     Highlight rows Part 7f already persisted in that same order) doesn't
     need to re-sort or re-match on anything.
+
+    Every keyword arg here is forwarded as-is to each compute_clip_boundary
+    call, so per-type resolution (pre_roll_s/post_roll_s/min_duration_s
+    left as None) happens independently per event — a batch mixing
+    LONG_RALLY and POWERFUL_SMASH events gets each its own type-appropriate
+    padding, not one padding applied to the whole batch.
     """
     return [
         compute_clip_boundary(
@@ -218,6 +300,9 @@ def compute_clip_boundaries(
             pre_roll_s=pre_roll_s,
             post_roll_s=post_roll_s,
             min_duration_s=min_duration_s,
+            padding_by_type=padding_by_type,
+            default_pre_roll_s=default_pre_roll_s,
+            default_post_roll_s=default_post_roll_s,
         )
         for event in events
     ]

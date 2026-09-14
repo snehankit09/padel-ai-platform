@@ -73,6 +73,15 @@ class HighlightItem(BaseModel):
     doesn't fail the whole match's extraction, it just leaves that row's
     clip_file_path unset). The frontend's per-card fallback for a null
     clip_url is what a viewer actually sees for either case.
+
+    thumbnail_url — Highlights Improvement Roadmap Tier 1a — follows the
+    exact same null-until-extracted convention as clip_url, from
+    Highlight.thumbnail_file_path, but is independently nullable: a clip
+    can have clip_url set with thumbnail_url still null (thumbnail
+    extraction is a soft failure in clip_extraction_stage.py, it doesn't
+    take the clip down with it), never the other way around. Not to be
+    confused with MatchListItem.thumbnail_url above, a different field on
+    a different, match-level (not per-clip) response shape.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -83,6 +92,7 @@ class HighlightItem(BaseModel):
     end_time_seconds: float
     importance_score: float
     clip_url: str | None
+    thumbnail_url: str | None
 
 
 class MatchDetailResponse(BaseModel):

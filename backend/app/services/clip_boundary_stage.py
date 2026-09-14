@@ -105,7 +105,11 @@ def run_clip_boundary_calculation(payload: dict) -> None:
 
     ensure_ml_importable()
     from ml.pipeline.clip_boundaries import compute_clip_boundaries, summarize_clip_boundaries, to_serializable
-    from ml.pipeline.highlight_tagging import HighlightEvent
+    from ml.pipeline.highlight_tagging import (
+        HIGHLIGHT_TYPE_LONG_RALLY,
+        HIGHLIGHT_TYPE_POWERFUL_SMASH,
+        HighlightEvent,
+    )
 
     events = [HighlightEvent(**e) for e in highlights_data.get("highlights", [])]
 
@@ -114,12 +118,29 @@ def run_clip_boundary_calculation(payload: dict) -> None:
         video_id, len(events),
     )
 
+    # Per-HighlightType padding (Part 8a's "1c" follow-up) — any type not
+    # listed here falls back to (settings.clip_pre_roll_s,
+    # settings.clip_post_roll_s) via compute_clip_boundaries'
+    # default_pre_roll_s/default_post_roll_s. min_duration_s is left as
+    # None so each event's floor derives from whichever pre/post-roll
+    # actually applied to it, rather than one uniform floor across types.
+    padding_by_type = {
+        HIGHLIGHT_TYPE_POWERFUL_SMASH: (
+            settings.clip_powerful_smash_pre_roll_s,
+            settings.clip_powerful_smash_post_roll_s,
+        ),
+        HIGHLIGHT_TYPE_LONG_RALLY: (
+            settings.clip_long_rally_pre_roll_s,
+            settings.clip_long_rally_post_roll_s,
+        ),
+    }
+
     boundaries = compute_clip_boundaries(
         events,
         video_duration_s=video_duration_s,
-        pre_roll_s=settings.clip_pre_roll_s,
-        post_roll_s=settings.clip_post_roll_s,
-        min_duration_s=settings.clip_min_duration_s,
+        padding_by_type=padding_by_type,
+        default_pre_roll_s=settings.clip_pre_roll_s,
+        default_post_roll_s=settings.clip_post_roll_s,
     )
     summary = summarize_clip_boundaries(boundaries)
 
@@ -128,9 +149,12 @@ def run_clip_boundary_calculation(payload: dict) -> None:
     _write_json(
         clip_boundaries_path,
         {
-            "clip_pre_roll_s": settings.clip_pre_roll_s,
-            "clip_post_roll_s": settings.clip_post_roll_s,
-            "clip_min_duration_s": settings.clip_min_duration_s,
+            "default_pre_roll_s": settings.clip_pre_roll_s,
+            "default_post_roll_s": settings.clip_post_roll_s,
+            "clip_padding_by_type": {
+                highlight_type: {"pre_roll_s": pre, "post_roll_s": post}
+                for highlight_type, (pre, post) in padding_by_type.items()
+            },
             "video_duration_s": video_duration_s,
             **summary,
             "clip_boundaries": to_serializable(boundaries),

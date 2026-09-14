@@ -357,6 +357,22 @@ def make_clip_file_destination_path(video_id: uuid.UUID, index: int) -> str:
     return f"clips/{video_id}/clip_{index:03d}.mp4"
 
 
+def make_clip_thumbnail_destination_path(video_id: uuid.UUID, index: int) -> str:
+    """
+    Builds a destination key like `clips/<video_id>/clip_000_thumb.jpg` —
+    Highlights Improvement Roadmap Tier 1a's poster-frame image for one
+    highlight clip. Deliberately namespaced and indexed exactly like
+    make_clip_file_destination_path above (same `clips/` prefix, same
+    zero-padded `index`, same one-per-ClipBoundary-position meaning) since
+    a thumbnail is a second artifact *of* the same clip, not an
+    independent one — app/services/clip_extraction_stage.py calls both
+    this and make_clip_file_destination_path with the same `index` for a
+    given boundary, so the two files sit side by side and are trivially
+    recognizable as a pair on disk even without the DB in front of you.
+    """
+    return f"clips/{video_id}/clip_{index:03d}_thumb.jpg"
+
+
 def make_reel_file_destination_path(video_id: uuid.UUID) -> str:
     """
     Builds a destination key like `reels/<video_id>/reel.mp4` — where the

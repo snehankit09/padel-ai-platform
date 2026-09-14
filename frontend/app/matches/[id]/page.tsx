@@ -418,7 +418,17 @@ function HighlightCard({ highlight }: { highlight: HighlightItem }) {
     <div className="highlight-card">
       <div className="highlight-card-media">
         {highlight.clip_url ? (
-          <video controls preload="metadata" src={`${API_BASE_URL}${highlight.clip_url}`} />
+          // poster (Highlights Improvement Roadmap Tier 1a) is simply
+          // omitted, not defaulted to anything, when thumbnail_url is
+          // null — the browser falls back to its own "first decoded
+          // frame" behavior, same as before this field existed, rather
+          // than this needing its own placeholder-within-a-placeholder.
+          <video
+            controls
+            preload="metadata"
+            poster={highlight.thumbnail_url ? `${API_BASE_URL}${highlight.thumbnail_url}` : undefined}
+            src={`${API_BASE_URL}${highlight.clip_url}`}
+          />
         ) : (
           <div className="highlight-card-media-placeholder">Clip not extracted yet</div>
         )}

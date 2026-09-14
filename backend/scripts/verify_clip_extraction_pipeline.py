@@ -147,7 +147,13 @@ def probe_media(path: str) -> dict:
     }
 
 
-def flag_boundary(boundary: dict, *, pre_roll_s: float, post_roll_s: float, min_duration_s: float) -> list[str]:
+def flag_boundary(
+    boundary: dict,
+    *,
+    padding_by_type: dict[str, tuple[float, float]],
+    default_pre_roll_s: float,
+    default_post_roll_s: float,
+) -> list[str]:
     """
     Heuristic reasons a *boundary* (before it's even cut) is worth a
     human's limited attention first — same "auto-flag, don't auto-judge"
@@ -156,7 +162,21 @@ def flag_boundary(boundary: dict, *, pre_roll_s: float, post_roll_s: float, min_
     silently clamped away by the video's own edges (see
     ml/pipeline/clip_boundaries.py's _expand_to_min_duration), which is
     exactly what produces a clip that starts or ends mid-action.
+
+    Compares against this boundary's own HighlightType's expected padding
+    (per-type since Part 8a's "1c" follow-up), not one uniform pre/post-roll
+    across every type — a smash's shorter expected pre-roll shouldn't get
+    flagged against a long rally's longer one, or vice versa.
     """
+    from ml.pipeline.clip_boundaries import get_padding_for_type
+
+    pre_roll_s, post_roll_s = get_padding_for_type(
+        boundary["highlight_type"],
+        padding_by_type=padding_by_type,
+        default_pre_roll_s=default_pre_roll_s,
+        default_post_roll_s=default_post_roll_s,
+    )
+    min_duration_s = pre_roll_s + post_roll_s
     reasons = []
     actual_pre_roll = boundary["event_start_time_s"] - boundary["start_time_s"]
     actual_post_roll = boundary["end_time_s"] - boundary["event_end_time_s"]
@@ -323,7 +343,11 @@ def main() -> None:
     print(f"\n=== Step 2/4: clip boundary calculation (Part 8a, real settings) ===")
     ensure_ml_importable()
     from ml.pipeline.clip_boundaries import compute_clip_boundaries, summarize_clip_boundaries, to_serializable
-    from ml.pipeline.highlight_tagging import HighlightEvent
+    from ml.pipeline.highlight_tagging import (
+        HIGHLIGHT_TYPE_LONG_RALLY,
+        HIGHLIGHT_TYPE_POWERFUL_SMASH,
+        HighlightEvent,
+    )
 
     highlights_data = json.loads(highlights_path.read_text())
     events = [HighlightEvent(**e) for e in highlights_data.get("highlights", [])]
@@ -331,20 +355,38 @@ def main() -> None:
         print("[8g] No highlight events in this Part 7 output — nothing for Part 8 to cut. Exiting.")
         sys.exit(0)
 
+    # Per-HighlightType padding (Part 8a's "1c" follow-up) — see
+    # ml/pipeline/clip_boundaries.py's CLIP_PADDING_BY_HIGHLIGHT_TYPE and
+    # app/services/clip_boundary_stage.py, which builds this same mapping
+    # from these same settings for the real `analyze` stage.
+    padding_by_type = {
+        HIGHLIGHT_TYPE_POWERFUL_SMASH: (
+            settings.clip_powerful_smash_pre_roll_s,
+            settings.clip_powerful_smash_post_roll_s,
+        ),
+        HIGHLIGHT_TYPE_LONG_RALLY: (
+            settings.clip_long_rally_pre_roll_s,
+            settings.clip_long_rally_post_roll_s,
+        ),
+    }
+
     clip_boundaries = compute_clip_boundaries(
         events,
         video_duration_s=video_duration_s,
-        pre_roll_s=settings.clip_pre_roll_s,
-        post_roll_s=settings.clip_post_roll_s,
-        min_duration_s=settings.clip_min_duration_s,
+        padding_by_type=padding_by_type,
+        default_pre_roll_s=settings.clip_pre_roll_s,
+        default_post_roll_s=settings.clip_post_roll_s,
     )
     boundaries = to_serializable(clip_boundaries)
     summary = summarize_clip_boundaries(clip_boundaries)
     (work_dir / "clip_boundaries.json").write_text(json.dumps(
         {
-            "clip_pre_roll_s": settings.clip_pre_roll_s,
-            "clip_post_roll_s": settings.clip_post_roll_s,
-            "clip_min_duration_s": settings.clip_min_duration_s,
+            "default_pre_roll_s": settings.clip_pre_roll_s,
+            "default_post_roll_s": settings.clip_post_roll_s,
+            "clip_padding_by_type": {
+                highlight_type: {"pre_roll_s": pre, "post_roll_s": post}
+                for highlight_type, (pre, post) in padding_by_type.items()
+            },
             "video_duration_s": video_duration_s,
             **summary,
             "clip_boundaries": boundaries,
@@ -356,8 +398,10 @@ def main() -> None:
 
     flags_by_index = {
         i: flag_boundary(
-            b, pre_roll_s=settings.clip_pre_roll_s, post_roll_s=settings.clip_post_roll_s,
-            min_duration_s=settings.clip_min_duration_s,
+            b,
+            padding_by_type=padding_by_type,
+            default_pre_roll_s=settings.clip_pre_roll_s,
+            default_post_roll_s=settings.clip_post_roll_s,
         )
         for i, b in enumerate(boundaries)
     }
@@ -411,9 +455,12 @@ def main() -> None:
         "video": str(video_path),
         "video_duration_s": video_duration_s,
         "source_has_audio": source_has_audio,
-        "clip_pre_roll_s": settings.clip_pre_roll_s,
-        "clip_post_roll_s": settings.clip_post_roll_s,
-        "clip_min_duration_s": settings.clip_min_duration_s,
+        "default_pre_roll_s": settings.clip_pre_roll_s,
+        "default_post_roll_s": settings.clip_post_roll_s,
+        "clip_padding_by_type": {
+            highlight_type: {"pre_roll_s": pre, "post_roll_s": post}
+            for highlight_type, (pre, post) in padding_by_type.items()
+        },
         "boundary_count": len(boundaries),
         "clips_rendered": len(render_set),
         "clips_with_extraction_errors": sum(1 for e in entries if e["extraction_error"]),
@@ -449,8 +496,12 @@ def _render_markdown_checklist(report: dict) -> str:
         "",
         f"Video: `{report['video']}` ({report['video_duration_s']:.1f}s, "
         f"audio: {'yes' if report['source_has_audio'] else 'no'})",
-        f"Padding: pre-roll {report['clip_pre_roll_s']:.1f}s / post-roll {report['clip_post_roll_s']:.1f}s / "
-        f"min duration {report['clip_min_duration_s']:.1f}s",
+        f"Default padding (any type without its own override): "
+        f"pre-roll {report['default_pre_roll_s']:.1f}s / post-roll {report['default_post_roll_s']:.1f}s",
+        "Per-type padding: " + ", ".join(
+            f"{highlight_type} (pre {p['pre_roll_s']:.1f}s / post {p['post_roll_s']:.1f}s)"
+            for highlight_type, p in report["clip_padding_by_type"].items()
+        ),
         f"Clip boundaries: {report['boundary_count']} | Clips rendered: {report['clips_rendered']} | "
         f"Extraction errors: {report['clips_with_extraction_errors']} | "
         f"Technical issues: {report['clips_with_technical_issues']}",
