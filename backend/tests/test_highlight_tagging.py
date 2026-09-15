@@ -11,6 +11,8 @@ Run with: pytest backend/tests/test_highlight_tagging.py -v
 
 from __future__ import annotations
 
+import pytest
+
 from app.core.ml_path import ensure_ml_importable
 
 ensure_ml_importable()
@@ -24,6 +26,7 @@ from ml.pipeline.highlight_tagging import (  # noqa: E402
     HIGHLIGHT_TYPE_FAST_EXCHANGE,
     HIGHLIGHT_TYPE_LONG_RALLY,
     HIGHLIGHT_TYPE_POWERFUL_SMASH,
+    HIGHLIGHT_TYPE_SCORE_WEIGHT,
     HIGHLIGHT_TYPE_SPECTACULAR_SAVE,
     detect_highlights,
     summarize_highlights,
@@ -165,7 +168,12 @@ def test_smash_at_threshold_scores_at_the_floor():
 
     assert event is not None
     assert event.highlight_type == HIGHLIGHT_TYPE_POWERFUL_SMASH
-    assert event.importance_score == 0.5
+    # Tier 2: the floor is 0.0 now, the same convention every other tag_*
+    # function's own "just barely qualifies" case uses — see
+    # test_long_rally_score_is_near_zero_right_at_the_floor and
+    # test_fast_exchange_score_saturates_with_more_shots (its short_events
+    # assertion) below for the equivalent case on the other two types.
+    assert event.importance_score == 0.0
     assert event.source_frame_index == 10
     assert event.start_time_s == 10 / SAMPLE_FPS
     assert event.end_time_s == 13 / SAMPLE_FPS
@@ -179,7 +187,11 @@ def test_smash_at_or_above_ceiling_ratio_saturates_to_one():
     assert event.importance_score == 1.0
 
 
-def test_smash_with_no_height_ratio_falls_back_to_floor_score():
+def test_smash_with_no_height_ratio_falls_back_to_a_neutral_score():
+    # Tier 2: 0.5 here is a deliberately different thing than "the floor"
+    # (the floor is 0.0 now) — it's a neutral middle value for a case
+    # where contact_height_ratio is unexpectedly missing, unrelated to
+    # where the pre-Tier-2 floor used to sit at the same number.
     shot = _shot(10, shot_type=SHOT_TYPE_SMASH, contact_height_ratio=None)
     event = tag_powerful_smash(shot, rally_index=1, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05)
     assert event.importance_score == 0.5
@@ -198,6 +210,39 @@ def test_quick_return_by_a_different_player_is_a_save():
     event = events[0]
     assert event.highlight_type == HIGHLIGHT_TYPE_SPECTACULAR_SAVE
     assert event.source_frame_index == 12
+    # 0.4s response out of a 0.8s max -> exactly halfway between the
+    # floor and the ceiling under Tier 2's linear scale. pytest.approx
+    # since (max_response_s - response_s) / max_response_s doesn't land
+    # on an exact float 0.5 here (0.8 - 0.4 != 0.4 in binary floating
+    # point) -- a precision artifact of the division, not a logic bug.
+    assert event.importance_score == pytest.approx(0.5)
+
+
+def test_instant_save_saturates_to_one():
+    rally = _rally(1, duration_s=5.0)
+    smash = _shot(10, shot_type=SHOT_TYPE_SMASH, player_track_id=1)
+    save = _shot(10, shot_type=SHOT_TYPE_GROUNDSTROKE, player_track_id=2)  # same frame -> 0.0s response
+    events = tag_spectacular_saves(rally, [smash, save], sample_fps=SAMPLE_FPS, max_response_s=0.8)
+    assert events[0].importance_score == 1.0
+
+
+def test_save_at_max_response_scores_at_the_floor():
+    # Tier 2: response_s == max_response_s is the slowest response that
+    # still counts as a save at all -- same "0.0 at the qualifying
+    # threshold" convention every other tag_* function now uses. 0.8s at
+    # SAMPLE_FPS=5.0 is exactly 4 frames later. pytest.approx: computing
+    # response_s via frame_index/sample_fps subtraction doesn't land on
+    # an exact float 0.8 (binary floating point can't represent 0.8
+    # exactly), so the resulting score is a hair above 0.0, not exactly
+    # 0.0 -- a precision artifact, not a boundary-exclusion bug (confirmed
+    # separately: response_s still compares as <= max_response_s, so the
+    # event isn't dropped at this boundary).
+    rally = _rally(1, duration_s=5.0)
+    smash = _shot(10, shot_type=SHOT_TYPE_SMASH, player_track_id=1)
+    save = _shot(14, shot_type=SHOT_TYPE_GROUNDSTROKE, player_track_id=2)  # 0.8s later
+    events = tag_spectacular_saves(rally, [smash, save], sample_fps=SAMPLE_FPS, max_response_s=0.8)
+    assert len(events) == 1
+    assert events[0].importance_score == pytest.approx(0.0, abs=1e-9)
 
 
 def test_slow_response_is_not_a_save():
@@ -232,7 +277,52 @@ def test_non_smash_shot_before_a_return_is_not_a_save():
     assert events == []
 
 
-# --- detect_highlights end to end -------------------------------------------
+# --- cross-type score calibration (Highlights Improvement Roadmap Tier 2) ---
+
+
+def test_every_type_scores_zero_at_its_own_barely_qualifying_threshold():
+    """
+    The whole point of Tier 2, as one assertion: construct the least
+    impressive still-qualifying event of each type and confirm every one
+    of them scores exactly 0.0, not four different numbers. Before Tier
+    2, a barely-qualifying smash scored 0.5 and a barely-qualifying save
+    scored 0.6 here -- this test would have failed against the old
+    formulas, which is exactly the bug this tier fixed.
+    """
+    long_rally_event = tag_long_rally(_rally(1, duration_s=15.0), min_duration_s=15.0, score_saturation_s=35.0)
+    fast_exchange_events = tag_fast_exchanges(
+        _rally(2, duration_s=5.0), [_shot(i) for i in (0, 2, 4, 6)],
+        sample_fps=SAMPLE_FPS, max_interval_s=1.0, min_shot_count=4, score_saturation_count=8,
+    )
+    smash_event = tag_powerful_smash(
+        _shot(10, shot_type=SHOT_TYPE_SMASH, contact_height_ratio=1.05),
+        rally_index=3, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05, score_ceiling_ratio=1.6,
+    )
+    save_events = tag_spectacular_saves(
+        _rally(4, duration_s=5.0),
+        [_shot(10, shot_type=SHOT_TYPE_SMASH, player_track_id=1), _shot(14, player_track_id=2)],
+        sample_fps=SAMPLE_FPS, max_response_s=0.8,
+    )
+
+    assert long_rally_event.importance_score == 0.0
+    assert fast_exchange_events[0].importance_score == 0.0
+    assert smash_event.importance_score == 0.0
+    # Same float-precision note as test_save_at_max_response_scores_at_the_floor.
+    assert save_events[0].importance_score == pytest.approx(0.0, abs=1e-9)
+
+
+def test_score_weights_default_to_a_no_op():
+    """
+    HIGHLIGHT_TYPE_SCORE_WEIGHT is the extension point for real,
+    footage-informed cross-type weighting -- but not yet. This just
+    guards against someone bumping a weight in a drive-by edit without
+    the real footage review that's supposed to justify it (see the
+    constant's own comment): every weight must stay 1.0 until that
+    review actually happens.
+    """
+    assert all(weight == 1.0 for weight in HIGHLIGHT_TYPE_SCORE_WEIGHT.values())
+
+
 
 
 def test_detect_highlights_combines_every_rule_across_rallies():

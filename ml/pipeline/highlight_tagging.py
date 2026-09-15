@@ -73,6 +73,32 @@ list of HighlightEvent out. Fed by
 app/services/highlight_tagging_stage.py (Part 7e's glue layer), which
 knows how to read persisted rallies.json/shots.json (and, when present,
 outcomes.json/serves.json) back into these shapes.
+
+**Cross-type score comparability (Highlights Improvement Roadmap Tier 2).**
+Every tag_* function's importance_score now follows the same convention:
+0.0 at whatever threshold makes an event qualify for its HighlightType at
+all, rising to 1.0 at that type's own saturation point. This wasn't
+always true — tag_powerful_smash and tag_spectacular_saves used to
+compress their scores into [0.5, 1.0] and [0.6, 1.0] respectively, so a
+smash or save that only just barely qualified would still outscore a
+genuinely impressive long rally or fast exchange, structurally, before
+anyone even looked at how exciting either moment actually was. That
+asymmetry was directly checkable by reading the four formulas side by
+side — no real match footage needed to find or fix it, unlike the
+HIGHLIGHT_TYPE_SCORE_WEIGHT question just below, which does.
+
+Fixing the floor makes scores comparable *by construction*, not because
+anyone has verified 0.7 always feels equally exciting whether it comes
+from a rally or a smash — that's still an open, genuinely subjective
+question. HIGHLIGHT_TYPE_SCORE_WEIGHT (applied centrally in
+detect_highlights, not inside any individual tag_* function) is the
+extension point for that: currently every weight is 1.0 — a deliberate
+no-op, not a claim that no type deserves more or less weight than
+another — until someone watches enough real reels to have an actual
+opinion worth encoding. Bumping a weight without that review would trade
+one unexamined bias (the old floor asymmetry) for a different one that's
+merely harder to notice, not evidence-based just because it's a
+different number.
 """
 
 from __future__ import annotations
@@ -142,6 +168,28 @@ DEFAULT_POWERFUL_SMASH_SCORE_CEILING_RATIO = 1.6
 # contact to return contact.
 DEFAULT_SPECTACULAR_SAVE_MAX_RESPONSE_S = 0.8
 
+# --- Cross-type score calibration (Highlights Improvement Roadmap Tier 2) ---
+
+# Applied to a HighlightEvent's importance_score in detect_highlights,
+# AFTER every tag_* function has already scored its own event on its own
+# [0, 1] "0 at qualifying threshold, 1 at saturation" scale (see module
+# docstring's "Cross-type score comparability" section for why that scale
+# is now shared). This is the extension point for a further, genuinely
+# subjective adjustment -- "an impressive smash is worth more attention
+# than an impressive long rally, even at the same normalized score" -- if
+# and when real match footage review actually supports that claim.
+#
+# Every weight is 1.0 today: not because no type deserves more weight
+# than another, but because nobody has watched enough real reels yet to
+# say which ones and by how much. Change these only from that kind of
+# review, not from a guess -- seed one bias for another otherwise.
+HIGHLIGHT_TYPE_SCORE_WEIGHT: Mapping[str, float] = {
+    HIGHLIGHT_TYPE_LONG_RALLY: 1.0,
+    HIGHLIGHT_TYPE_FAST_EXCHANGE: 1.0,
+    HIGHLIGHT_TYPE_POWERFUL_SMASH: 1.0,
+    HIGHLIGHT_TYPE_SPECTACULAR_SAVE: 1.0,
+}
+
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
@@ -159,12 +207,19 @@ class HighlightEvent:
     to Part 7e/8 rather than deciding it itself: this module answers
     "what happened and when", not "how should the clip around it be cut".
 
-    `importance_score` is in [0, 1], comparable *within* one highlight_type
-    but not necessarily calibrated *across* types (a 0.9 long_rally and a
-    0.9 powerful_smash aren't claimed to be equally exciting) -- Part 8's
-    ranking-across-types logic, if it wants one, composes these with its
-    own per-type weighting rather than assuming this module already did
-    that.
+    `importance_score` is in [0, 1]. Every tag_* function scores its own
+    events on the same "0.0 at the threshold that makes this event
+    qualify at all, 1.0 at that type's own saturation point" scale (see
+    module docstring's "Cross-type score comparability" section), so
+    scores ARE comparable across HighlightTypes by construction -- a 0.7
+    long_rally and a 0.7 powerful_smash both mean "moderately past this
+    type's own qualifying bar," not two unrelated numbers. What that
+    construction does NOT claim is that 0.7 *feels* equally exciting
+    either way to an actual viewer -- HIGHLIGHT_TYPE_SCORE_WEIGHT is the
+    deliberately-unused-for-now extension point for that further, more
+    subjective adjustment, once real footage review actually justifies
+    one. Part 8's ranking-across-types logic (ml.pipeline.reel_selection)
+    sorts on this field directly for exactly this reason.
 
     `source_frame_index` is the single frame the event is anchored to when
     there is one (a shot's contact frame) -- None for whole-rally events
@@ -293,6 +348,14 @@ def tag_powerful_smash(
     7c) -- the natural "moment of impact through the ball landing/being
     played again" span for a single-shot event, same idea
     tag_spectacular_saves uses for its own two-shot window.
+
+    Score is 0.0 at smash_height_ratio itself (just barely cleared 7c's
+    own smash threshold -- the least impressive shot 7c would still call
+    a smash at all) rising linearly to 1.0 at score_ceiling_ratio, the
+    SAME "0 at the qualifying threshold, 1 at saturation" convention
+    tag_long_rally and tag_fast_exchanges already use -- see the module
+    docstring's "Cross-type score comparability" section for why this
+    matters and what changed here (Highlights Improvement Roadmap Tier 2).
     """
     if shot.shot_type != SHOT_TYPE_SMASH:
         return None
@@ -304,12 +367,16 @@ def tag_powerful_smash(
     if shot.contact_height_ratio is None:
         # A smash was classified without contact_height_ratio surviving
         # into this Shot -- shouldn't happen given classify_shot always
-        # sets it for a SHOT_TYPE_SMASH, but score conservatively (the
-        # threshold floor) rather than raise over a scoring nicety.
+        # sets it for a SHOT_TYPE_SMASH, but score conservatively (a
+        # neutral middle value, not a claim either way) rather than raise
+        # over a scoring nicety. Not "the floor" under the current
+        # (Tier 2) convention -- the floor is 0.0 now; 0.5 here is
+        # deliberately a different, unrelated number that happens to
+        # coincide with where the floor used to sit pre-Tier 2.
         score = 0.5
     else:
         span = max(score_ceiling_ratio - smash_height_ratio, 1e-9)
-        score = _clamp01(0.5 + 0.5 * (shot.contact_height_ratio - smash_height_ratio) / span)
+        score = _clamp01((shot.contact_height_ratio - smash_height_ratio) / span)
 
     return HighlightEvent(
         rally_index=rally_index,
@@ -352,6 +419,13 @@ def tag_spectacular_saves(
 
     shots_in_rally must already belong to exactly this rally and be
     sorted by frame_index, same precondition as tag_fast_exchanges.
+
+    Score is 0.0 at response_s == max_response_s (the slowest response
+    that still counts as a save at all) rising linearly to 1.0 at an
+    instant (response_s == 0) return -- same "0 at the qualifying
+    threshold, 1 at saturation" convention every tag_* function in this
+    module now uses; see the module docstring's "Cross-type score
+    comparability" section (Highlights Improvement Roadmap Tier 2).
     """
     events: list[HighlightEvent] = []
     for prev_shot, cur_shot in zip(shots_in_rally, shots_in_rally[1:]):
@@ -368,7 +442,7 @@ def tag_spectacular_saves(
         if response_s < 0 or response_s > max_response_s:
             continue
 
-        score = _clamp01(0.6 + 0.4 * (1.0 - response_s / max_response_s))
+        score = _clamp01((max_response_s - response_s) / max_response_s)
         events.append(
             HighlightEvent(
                 rally_index=rally.rally_index,
@@ -476,6 +550,30 @@ def detect_highlights(
                 max_response_s=spectacular_save_max_response_s,
             )
         )
+
+    # Cross-type calibration (Tier 2) — applied once, centrally, here,
+    # rather than inside each tag_* function, so every tag_* function's
+    # own score stays a pure, type-local "0 at threshold, 1 at
+    # saturation" number (useful on its own, e.g. for the docstring-level
+    # tests that check one type's scoring in isolation) and this is the
+    # one place that knows about cross-type weighting at all. A no-op
+    # today since every weight is 1.0 — see HIGHLIGHT_TYPE_SCORE_WEIGHT's
+    # own comment for why that's deliberate, not an oversight.
+    if any(weight != 1.0 for weight in HIGHLIGHT_TYPE_SCORE_WEIGHT.values()):
+        events = [
+            HighlightEvent(
+                rally_index=e.rally_index,
+                highlight_type=e.highlight_type,
+                start_time_s=e.start_time_s,
+                end_time_s=e.end_time_s,
+                importance_score=_clamp01(
+                    e.importance_score * HIGHLIGHT_TYPE_SCORE_WEIGHT.get(e.highlight_type, 1.0)
+                ),
+                reason=e.reason,
+                source_frame_index=e.source_frame_index,
+            )
+            for e in events
+        ]
 
     return events
 
