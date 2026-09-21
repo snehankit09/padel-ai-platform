@@ -1,0 +1,40 @@
+diff --git a/backend/app/core/config.py b/backend/app/core/config.py
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -327,8 +327,14 @@
+     #     after the last). 0.0 means a hard cut with no reserved gap.
+     #     This module only reserves the time — a later FFmpeg assembly
+     #     stage decides how to fill it (cut, crossfade, music sting).
++    #     Reel Insta-Level Roadmap Tier 1b: defaults to 0.0 (a true hard
++    #     cut, no black flash between clips) as a stopgap — the *actual*
++    #     right treatment here is a real crossfade (Tier 3a), not a
++    #     reserved black segment, which is why this stays at 0.0 rather
++    #     than some nonzero "nicer" gap in the meantime: a hard cut is
++    #     honest about being unfinished; a black flash just looks broken.
+     reel_ordering_strategy: str = "chronological"
+-    reel_transition_gap_s: float = 0.5
++    reel_transition_gap_s: float = 0.0
+ 
+     # --- Pipeline retry (Part 4d) ---
+     # Per-stage retry, not whole-video retry — a stage that fails (e.g.
+diff --git a/backend/tests/test_reel_generation_stage.py b/backend/tests/test_reel_generation_stage.py
+--- a/backend/tests/test_reel_generation_stage.py
++++ b/backend/tests/test_reel_generation_stage.py
+@@ -183,9 +183,14 @@
+     probe = _probe(reel_local_path)
+     assert probe["has_video"]
+     assert probe["has_audio"]
+-    # Roughly the sum of both clip durations (2s + 2s) plus the default
+-    # reel_transition_gap_s (0.5s) between them -- a real, playable, non-trivial file.
+-    assert probe["duration_s"] > 3.5
++    # Reel Insta-Level Roadmap: sum of both clip durations (2s + 2s) plus
++    # the Tier 1a title card (_DEFAULT_TITLE_CARD_DURATION_S, 2.5s) that
++    # now prepends every reel, plus reel_transition_gap_s -- 0.0 as of
++    # Tier 1b (a true hard cut, no reserved black segment), so nothing
++    # from that side. ~6.5s total; the >5.0 bound leaves real margin for
++    # encoder/container overhead without the assertion being so loose it
++    # would silently tolerate the title card going missing entirely.
++    assert probe["duration_s"] > 5.0
+ 
+ 
+ def test_no_cuttable_highlights_persists_a_real_empty_reel_and_does_not_touch_ffmpeg(sqlite_session, storage_env):

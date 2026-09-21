@@ -327,8 +327,14 @@ class Settings(BaseSettings):
     #     after the last). 0.0 means a hard cut with no reserved gap.
     #     This module only reserves the time — a later FFmpeg assembly
     #     stage decides how to fill it (cut, crossfade, music sting).
+    #     Reel Insta-Level Roadmap Tier 1b: defaults to 0.0 (a true hard
+    #     cut, no black flash between clips) as a stopgap — the *actual*
+    #     right treatment here is a real crossfade (Tier 3a), not a
+    #     reserved black segment, which is why this stays at 0.0 rather
+    #     than some nonzero "nicer" gap in the meantime: a hard cut is
+    #     honest about being unfinished; a black flash just looks broken.
     reel_ordering_strategy: str = "chronological"
-    reel_transition_gap_s: float = 0.5
+    reel_transition_gap_s: float = 0.0
 
     # --- Pipeline retry (Part 4d) ---
     # Per-stage retry, not whole-video retry — a stage that fails (e.g.

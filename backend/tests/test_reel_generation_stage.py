@@ -183,9 +183,14 @@ def test_assembles_a_real_playable_reel_from_real_clips(sqlite_session, storage_
     probe = _probe(reel_local_path)
     assert probe["has_video"]
     assert probe["has_audio"]
-    # Roughly the sum of both clip durations (2s + 2s) plus the default
-    # reel_transition_gap_s (0.5s) between them -- a real, playable, non-trivial file.
-    assert probe["duration_s"] > 3.5
+    # Reel Insta-Level Roadmap: sum of both clip durations (2s + 2s) plus
+    # the Tier 1a title card (_DEFAULT_TITLE_CARD_DURATION_S, 2.5s) that
+    # now prepends every reel, plus reel_transition_gap_s -- 0.0 as of
+    # Tier 1b (a true hard cut, no reserved black segment), so nothing
+    # from that side. ~6.5s total; the >5.0 bound leaves real margin for
+    # encoder/container overhead without the assertion being so loose it
+    # would silently tolerate the title card going missing entirely.
+    assert probe["duration_s"] > 5.0
 
 
 def test_no_cuttable_highlights_persists_a_real_empty_reel_and_does_not_touch_ffmpeg(sqlite_session, storage_env):
