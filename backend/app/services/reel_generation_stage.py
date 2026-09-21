@@ -76,30 +76,38 @@ nobody notices. The `FAILED` status write happens first so a `Reel` row
 never sits at a stale `GENERATING` forever if every retry keeps failing
 and `done` itself is eventually marked `VideoStatus.FAILED`.
 
-**What this does NOT do, and why.** No title card (10d,
-ml.common.reel_assembly.generate_title_card) and no music track get
-attached here — 10d's own docstring is explicit a caller decides
-whether/what to prepend, and nothing in this codebase picks match
-title-card text or a music track today (`Reel.music_track` stays
-whatever `persist_reel`'s own default leaves it, `None` — see PRD
+**What this does NOT do, and why.** No music track gets attached here —
+nothing in this codebase picks a music track today (`Reel.music_track`
+stays whatever `persist_reel`'s own default leaves it, `None` — see PRD
 Module 4's "swappable without regenerating the reel" framing already
 noted in 10e's docstring: a real value is a human/product decision to
 wire in later, not one to fabricate here just to make the reel look
-more finished than the data supports).
+more finished than the data supports). A title card (10d,
+ml.common.reel_assembly.generate_title_card) DOES get attached, as of
+the Reel Insta-Level Roadmap's Tier 1a — see _build_title_card_lines
+below for where its text comes from (real Match/Player data, not
+fabricated) — prepended as the first entry of ordered_clip_paths, same
+"caller decides whether/what to prepend" composability 10d's own
+docstring describes, this is just that caller now making that decision.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import uuid
+from collections import defaultdict
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.database import get_sync_db
 from app.core.ml_path import ensure_ml_importable
 from app.models.enums import ReelStatus
 from app.models.highlight import Highlight
+from app.models.match import Match
+from app.models.match_player import MatchPlayer
 from app.models.reel import Reel
 from app.models.video import Video
 from app.services.reel_persistence_stage import persist_reel
@@ -110,6 +118,47 @@ logger = logging.getLogger(__name__)
 
 class ReelGenerationStageError(Exception):
     """Raised when `done` can't find something an earlier stage should already have produced, or ffmpeg assembly itself fails."""
+
+
+def _build_title_card_lines(match: Match) -> list[str]:
+    """
+    Reel Insta-Level Roadmap Tier 1a. Builds the 1-2 lines
+    ml.common.reel_assembly.generate_title_card burns onto the reel's
+    opening card, from real Match/MatchPlayer/Player data — never
+    fabricated placeholder text (see this module's own "What this does
+    NOT do" note for why that distinction matters here).
+
+    Line 1 is a "Team A vs Team B" roster line, built from
+    match.match_players grouped by team_number (not match.players — the
+    association-proxy shortcut loses team_number, exactly the thing this
+    line needs). Either side can legitimately be empty (a match created
+    without full roster data) — this still produces a sensible line for
+    whichever side actually has players, or skips the roster line
+    entirely if neither does, rather than rendering "vs" with nothing on
+    either side of it.
+
+    Line 2 is venue + date. venue is nullable (Match.venue); played_at is
+    NOT NULL, so a date is always available even when nothing else is —
+    the one line this function is guaranteed to return.
+    """
+    by_team: dict[int, list[str]] = defaultdict(list)
+    for match_player in match.match_players:
+        by_team[match_player.team_number].append(match_player.player.full_name)
+
+    lines: list[str] = []
+
+    team_numbers = sorted(by_team.keys())
+    team_strs = [", ".join(by_team[team_number]) for team_number in team_numbers if by_team[team_number]]
+    if len(team_strs) >= 2:
+        lines.append(f"{team_strs[0]} vs {team_strs[1]}")
+    elif len(team_strs) == 1:
+        lines.append(team_strs[0])
+    # else: no roster data at all for this match -- no roster line, not a blank "vs".
+
+    date_str = match.played_at.strftime("%b %d, %Y")
+    lines.append(f"{match.venue} \u00b7 {date_str}" if match.venue else date_str)
+
+    return lines
 
 
 def run_reel_generation(payload: dict) -> None:
@@ -145,8 +194,22 @@ def run_reel_generation(payload: dict) -> None:
             return
         match_id = video.match_id
 
+    # Own short, read-only session — Reel Insta-Level Roadmap Tier 1a.
+    # Fetched here, once, rather than inside _build_title_card_lines
+    # itself, so that function stays pure (takes a Match, returns
+    # strings, no DB session of its own to manage) — same "keep the
+    # DB-touching code and the pure logic in separate places" split this
+    # module already draws around ml.common.reel_assembly and friends.
+    with get_sync_db() as db:
+        match = db.execute(
+            select(Match)
+            .where(Match.id == match_id)
+            .options(selectinload(Match.match_players).selectinload(MatchPlayer.player))
+        ).scalar_one()
+        title_card_lines = _build_title_card_lines(match)
+
     ensure_ml_importable()
-    from ml.common.reel_assembly import ReelAssemblyError, assemble_reel
+    from ml.common.reel_assembly import ReelAssemblyError, assemble_reel, generate_title_card, probe_clip_frame_size
     from ml.pipeline.reel_ordering import build_reel_timeline, order_clips_for_reel
     from ml.pipeline.reel_selection import ClipCandidate, select_clips_for_reel
 
@@ -204,6 +267,22 @@ def run_reel_generation(payload: dict) -> None:
 
     reel_key = make_reel_file_destination_path(video_uuid)
     reel_local_path = storage.get_local_path(reel_key)
+
+    # Reel Insta-Level Roadmap Tier 1a. Sized to the reel's own real
+    # clips (probe_clip_frame_size on the first one — same frame size
+    # assemble_reel's own gap segments already probe for, see that
+    # function's docstring) so the title card doesn't introduce a
+    # resolution mismatch into a concat that otherwise assumes every
+    # segment already matches. Written next to the reel's own output
+    # rather than given a permanent storage key of its own — it's
+    # consumed into the final reel by assemble_reel below and never
+    # referenced again afterward, so it doesn't need one.
+    title_card_width, title_card_height = probe_clip_frame_size(ordered_clip_paths[0])
+    title_card_path = os.path.join(os.path.dirname(reel_local_path), "title_card.mp4")
+    generate_title_card(title_card_path, title_card_lines, width=title_card_width, height=title_card_height)
+
+    ordered_clip_paths = [title_card_path, *ordered_clip_paths]
+    gap_before_s = [0.0, *gap_before_s]
 
     logger.info(
         "[done] video_id=%s match_id=%s: assembling Reel id=%s from %d clip(s) -> %s",

@@ -108,7 +108,7 @@ class ReelAssemblyResult:
     file_size_bytes: int
 
 
-def _probe_clip_frame_size(clip_path: str) -> tuple[int, int]:
+def probe_clip_frame_size(clip_path: str) -> tuple[int, int]:
     """
     Real width/height of an already-normalized Part 8 clip, via ffprobe —
     same "don't trust anything but ffprobe" posture
@@ -119,6 +119,14 @@ def _probe_clip_frame_size(clip_path: str) -> tuple[int, int]:
     source's own aspect ratio, so two different source videos' clips can
     legitimately have different widths even after normalization — this
     reads the real value per-reel rather than assuming one).
+
+    Exported (no leading underscore) as of the Reel Insta-Level Roadmap's
+    Tier 1a — app/services/reel_generation_stage.py calls this directly
+    to size a title card to match the reel's own real clips, the same
+    frame size assemble_reel below already probes for its own gap
+    segments. Kept as one shared implementation rather than each caller
+    re-deriving it, since "what frame size are this reel's clips" is one
+    fact, not two.
     """
     result = subprocess.run(
         [
@@ -321,7 +329,7 @@ def assemble_reel(
         raise ReelAssemblyError("assemble_reel needs at least one clip — got an empty ordered_clip_paths")
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    width, height = _probe_clip_frame_size(ordered_clip_paths[0])
+    width, height = probe_clip_frame_size(ordered_clip_paths[0])
 
     with tempfile.TemporaryDirectory(prefix="padel_reel_assembly_") as tmp_dir:
         concat_entries: list[str] = []
