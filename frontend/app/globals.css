@@ -578,10 +578,46 @@ p.page-lede {
   gap: 10px;
 }
 
+.highlight-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.highlight-filter select {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+}
+
+.highlight-card-heading-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .highlight-type-tag {
   font-family: var(--font-display);
   font-weight: 600;
   font-size: 0.85rem;
+}
+
+.player-label-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  flex: none;
 }
 
 .highlight-card-time {

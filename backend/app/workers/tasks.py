@@ -91,6 +91,8 @@ from app.services.rally_detection_stage import run_rally_detection
 from app.services.serve_detection_stage import run_serve_detection
 from app.services.highlight_tagging_stage import run_highlight_tagging
 from app.services.player_statistics_stage import run_player_statistics_aggregation
+from app.services.team_side_labeling_stage import run_team_side_labeling
+from app.services.team_side_label_resolution_stage import run_team_side_label_resolution
 from app.services.point_outcome_stage import run_point_outcome_detection
 from app.services.reel_generation_stage import run_reel_generation
 from app.services.shot_classification_stage import run_shot_classification
@@ -412,7 +414,25 @@ def analyze_stage(self, payload: dict) -> dict:
     (app/services/player_statistics_persistence_stage.py) with an empty
     track_id -> Player.id mapping — see that module's own docstring for
     why this stage has no honest mapping to supply yet, and why an empty
-    one is correct rather than a shortcut.
+    one is correct rather than a shortcut. Highlights Improvement Roadmap
+    Tier 2d closes out `analyze` (app/services/team_side_labeling_stage.py):
+    it reads `track`'s player positions (Part 6b) and `detect`'s court
+    calibration (Part 5e) back off the payload, calls Tiers 1d/2c
+    (ml/pipeline/team_side_positions.py) to turn this video's track_ids
+    into MergedPlayers and a {track_id: label} lookup, and writes both to
+    their own JSON artifact for Phase 3 (attributing individual
+    highlights) to read back — see that module's own docstring for why a
+    missing court calibration means this run simply produces no such
+    artifact, rather than failing `analyze`. Highlights Improvement
+    Roadmap Tier 3c is the ACTUAL final sub-stage
+    (app/services/team_side_label_resolution_stage.py): it runs after
+    both 7f's Highlight rows (with Tier 3b's player_track_id already set)
+    and Tier 2d's team_side_labels.json exist — the earliest point in
+    this call order either could — and UPDATEs each attributed row's new
+    player_label column, the same "update a row an earlier sub-stage
+    already inserted" shape Part 8b already uses for clip_file_path. See
+    that stage's own module docstring for why `_analyze`'s order wasn't
+    simply changed to avoid needing this extra step.
 
     Falls back to the real logic unless a test has set
     STAGE_FN_OVERRIDES["analyze"], same pattern as detect_stage/track_stage.
@@ -428,6 +448,8 @@ def analyze_stage(self, payload: dict) -> dict:
         run_clip_boundary_calculation(p)
         run_clip_extraction(p)
         run_player_statistics_aggregation(p)
+        run_team_side_labeling(p)
+        run_team_side_label_resolution(p)
 
     stage_fn = STAGE_FN_OVERRIDES.get("analyze", _analyze)
     return run_stage(self, "analyze", payload, stage_fn=stage_fn)

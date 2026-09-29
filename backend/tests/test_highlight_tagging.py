@@ -100,6 +100,13 @@ def test_long_rally_score_is_near_zero_right_at_the_floor():
     assert event.importance_score == 0.0
 
 
+def test_long_rally_event_has_no_player_track_id():
+    """Tier 3a scoping call: a whole rally has no single natural "owner" player."""
+    rally = _rally(1, duration_s=20.0)
+    event = tag_long_rally(rally, min_duration_s=15.0, score_saturation_s=35.0)
+    assert event.player_track_id is None
+
+
 # --- fast exchange -------------------------------------------------------
 
 
@@ -121,6 +128,7 @@ def test_run_of_close_shots_is_tagged_fast_exchange():
     assert event.highlight_type == HIGHLIGHT_TYPE_FAST_EXCHANGE
     assert event.start_time_s == 0.0
     assert event.end_time_s == 8 / SAMPLE_FPS
+    assert event.player_track_id is None  # Tier 3a scoping call
 
 
 def test_a_slow_gap_splits_one_run_into_two():
@@ -177,6 +185,7 @@ def test_smash_at_threshold_scores_at_the_floor():
     assert event.source_frame_index == 10
     assert event.start_time_s == 10 / SAMPLE_FPS
     assert event.end_time_s == 13 / SAMPLE_FPS
+    assert event.player_track_id == 1  # Tier 3a: shot.player_track_id verbatim (the smasher)
 
 
 def test_smash_at_or_above_ceiling_ratio_saturates_to_one():
@@ -197,6 +206,18 @@ def test_smash_with_no_height_ratio_falls_back_to_a_neutral_score():
     assert event.importance_score == 0.5
 
 
+def test_powerful_smash_player_track_id_can_be_none_when_unresolved():
+    """
+    Tier 3a: player_track_id is shot.player_track_id verbatim, so when 7c
+    itself couldn't resolve which player made contact, this stays None
+    too rather than inventing one -- same "an ambiguous signal isn't
+    evidence" posture as everywhere else in this module.
+    """
+    shot = _shot(10, shot_type=SHOT_TYPE_SMASH, contact_height_ratio=1.3, player_track_id=None)
+    event = tag_powerful_smash(shot, rally_index=1, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05)
+    assert event.player_track_id is None
+
+
 # --- spectacular save --------------------------------------------------------
 
 
@@ -210,6 +231,7 @@ def test_quick_return_by_a_different_player_is_a_save():
     event = events[0]
     assert event.highlight_type == HIGHLIGHT_TYPE_SPECTACULAR_SAVE
     assert event.source_frame_index == 12
+    assert event.player_track_id == 2  # Tier 3a: the SAVER (cur_shot), not the smasher
     # 0.4s response out of a 0.8s max -> exactly halfway between the
     # floor and the ceiling under Tier 2's linear scale. pytest.approx
     # since (max_response_s - response_s) / max_response_s doesn't land
@@ -360,6 +382,39 @@ def test_detect_highlights_combines_every_rule_across_rallies():
     # Nothing in the short rally clears any threshold.
     assert all(e.rally_index != 2 for e in events)
 
+    # Tier 3a: attribution flows through detect_highlights unchanged.
+    by_type = {e.highlight_type: e for e in events if e.highlight_type in
+               (HIGHLIGHT_TYPE_POWERFUL_SMASH, HIGHLIGHT_TYPE_SPECTACULAR_SAVE,
+                HIGHLIGHT_TYPE_LONG_RALLY, HIGHLIGHT_TYPE_FAST_EXCHANGE)}
+    assert by_type[HIGHLIGHT_TYPE_POWERFUL_SMASH].player_track_id == 1  # the smasher
+    assert by_type[HIGHLIGHT_TYPE_SPECTACULAR_SAVE].player_track_id == 2  # the saver
+    assert by_type[HIGHLIGHT_TYPE_LONG_RALLY].player_track_id is None
+    assert by_type[HIGHLIGHT_TYPE_FAST_EXCHANGE].player_track_id is None
+
+
+def test_player_track_id_survives_the_cross_type_weighting_rebuild(monkeypatch):
+    """
+    detect_highlights rebuilds every HighlightEvent when any
+    HIGHLIGHT_TYPE_SCORE_WEIGHT differs from 1.0 (see its own comment on
+    that branch). That rebuild is real, separate object construction --
+    it's not enough for tag_powerful_smash to set player_track_id if this
+    second construction forgets to carry it over. Weights are 1.0 by
+    default (see test_score_weights_default_to_a_no_op), so this test
+    forces the branch by monkeypatching one weight, purely to exercise
+    that rebuild path at all.
+    """
+    import ml.pipeline.highlight_tagging as highlight_tagging_module
+
+    monkeypatch.setitem(highlight_tagging_module.HIGHLIGHT_TYPE_SCORE_WEIGHT, HIGHLIGHT_TYPE_POWERFUL_SMASH, 0.9)
+
+    rally = _rally(1, duration_s=5.0)
+    shots = [_shot(10, rally_index=1, shot_type=SHOT_TYPE_SMASH, player_track_id=7, contact_height_ratio=1.3)]
+
+    events = detect_highlights([rally], shots, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05)
+
+    [smash_event] = [e for e in events if e.highlight_type == HIGHLIGHT_TYPE_POWERFUL_SMASH]
+    assert smash_event.player_track_id == 7
+
 
 def test_detect_highlights_with_no_rallies_or_shots_is_empty():
     assert detect_highlights([], [], sample_fps=SAMPLE_FPS, smash_height_ratio=1.05) == []
@@ -386,6 +441,16 @@ def test_to_serializable_round_trips_every_field():
     assert data["importance_score"] == event.importance_score
     assert data["reason"] == event.reason
     assert data["source_frame_index"] is None
+    assert data["player_track_id"] is None
+
+
+def test_to_serializable_includes_a_real_player_track_id_for_attributed_types():
+    smash_event = tag_powerful_smash(
+        _shot(10, shot_type=SHOT_TYPE_SMASH, contact_height_ratio=1.3, player_track_id=5),
+        rally_index=1, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05,
+    )
+    data = to_serializable([smash_event])[0]
+    assert data["player_track_id"] == 5
 
 
 def test_summarize_highlights_counts_by_type_and_averages_score():
@@ -399,9 +464,29 @@ def test_summarize_highlights_counts_by_type_and_averages_score():
     assert summary["highlight_counts_by_type"][HIGHLIGHT_TYPE_LONG_RALLY] == 2
     assert summary["highlight_counts_by_type"][HIGHLIGHT_TYPE_FAST_EXCHANGE] == 0
     assert summary["avg_importance_score"] == (event_a.importance_score + event_b.importance_score) / 2
+    assert summary["attributed_count"] == 0  # Tier 3a: long_rally never attributes
+
+
+def test_summarize_highlights_attributed_count_only_counts_smash_and_save():
+    long_rally_event = tag_long_rally(_rally(1, duration_s=20.0), min_duration_s=15.0)
+    smash_event = tag_powerful_smash(
+        _shot(10, shot_type=SHOT_TYPE_SMASH, contact_height_ratio=1.3, player_track_id=1),
+        rally_index=2, sample_fps=SAMPLE_FPS, smash_height_ratio=1.05,
+    )
+    [save_event] = tag_spectacular_saves(
+        _rally(3, duration_s=5.0),
+        [_shot(10, shot_type=SHOT_TYPE_SMASH, player_track_id=1), _shot(12, player_track_id=2)],
+        sample_fps=SAMPLE_FPS, max_response_s=0.8,
+    )
+
+    summary = summarize_highlights([long_rally_event, smash_event, save_event])
+
+    assert summary["highlight_count"] == 3
+    assert summary["attributed_count"] == 2
 
 
 def test_summarize_highlights_with_no_events():
     summary = summarize_highlights([])
     assert summary["highlight_count"] == 0
     assert summary["avg_importance_score"] == 0.0
+    assert summary["attributed_count"] == 0

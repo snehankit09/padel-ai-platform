@@ -146,6 +146,7 @@ async def get_match(
                 importance_score=highlight.importance_score,
                 clip_url=storage.get_url(highlight.clip_file_path) if highlight.clip_file_path else None,
                 thumbnail_url=storage.get_url(highlight.thumbnail_file_path) if highlight.thumbnail_file_path else None,
+                player_label=highlight.player_label,
             )
             for highlight in highlights
         ],

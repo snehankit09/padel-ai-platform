@@ -333,6 +333,25 @@ def make_player_statistics_destination_path(video_id: uuid.UUID) -> str:
     return f"stats/{video_id}/player_stats.json"
 
 
+def make_team_side_labels_destination_path(video_id: uuid.UUID) -> str:
+    """
+    Builds a destination key like `team_sides/<video_id>/team_side_labels.json`
+    — where the `analyze` stage's team-side-labeling half (Highlights
+    Improvement Roadmap Tier 2d) writes ml.pipeline.team_side_positions'
+    Tier 1d/2a-2c output: every MergedPlayer found for this video (Tier
+    1d), and the flattened {track_id: label} lookup Tier 2c builds from
+    them (Phase 3's actual interface — see that module's own docstring).
+    Own top-level prefix, not folded into `tracks/` alongside
+    player_tracks.json: this is a *derived* artifact (needs a court
+    calibration on top of player_tracks.json to produce anything at all —
+    see app/services/team_side_labeling_stage.py's module docstring for
+    why a missing calibration means this file simply doesn't get written
+    that run, same non-fatal treatment court_detection_stage.py's own
+    failure gets), not another copy of the per-frame tracking data itself.
+    """
+    return f"team_sides/{video_id}/team_side_labels.json"
+
+
 def make_clip_file_destination_path(video_id: uuid.UUID, index: int) -> str:
     """
     Builds a destination key like `clips/<video_id>/clip_000.mp4` — where

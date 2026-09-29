@@ -11,6 +11,9 @@ of `Statistic` rows (Part 2's schema) that ml.pipeline.stats_
 aggregation (Part 9a) has already worked out how to compute honestly —
 the two tables this pipeline can populate before Part 8 (clip
 generation) and the rest of Part 9 (player-identity-keyed stats) exist.
+Each `Highlight` row's player_track_id (Tier 3b) is copied straight from
+7e's own event["player_track_id"] with no translation -- see 7e's module
+docstring for which HighlightTypes actually carry one.
 
 What this does NOT do, and why:
   - `Highlight.clip_file_path` stays NULL here. A HighlightEvent from
@@ -180,6 +183,13 @@ def run_analyze_persistence(payload: dict) -> None:
                     end_time_seconds=event["end_time_s"],
                     importance_score=event["importance_score"],
                     clip_file_path=None,
+                    # Tier 3a/3b: a raw ByteTrack track_id, present only
+                    # for POWERFUL_SMASH/SPECTACULAR_SAVE events -- 7e's
+                    # own to_serializable already sets this key to None
+                    # for every other type, so .get() with a None default
+                    # is just defensive, not doing any real translation
+                    # (see ml.pipeline.highlight_tagging's own docstring).
+                    player_track_id=event.get("player_track_id"),
                 )
             )
             highlight_count += 1

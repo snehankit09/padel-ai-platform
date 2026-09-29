@@ -96,12 +96,14 @@ def _outcomes_payload(outcomes: list[dict]) -> dict:
 
 
 def _highlight_event(
-    highlight_type: str = "long_rally", start: float = 0.0, end: float = 20.0, score: float = 0.7
+    highlight_type: str = "long_rally", start: float = 0.0, end: float = 20.0, score: float = 0.7,
+    *, player_track_id: int | None = None,
 ) -> dict:
     return {
         "rally_index": 1, "highlight_type": highlight_type,
         "start_time_s": start, "end_time_s": end,
         "importance_score": score, "reason": "test", "source_frame_index": None,
+        "player_track_id": player_track_id,
     }
 
 
@@ -207,6 +209,69 @@ def test_retry_does_not_duplicate_rows(sqlite_session, storage_env):
         stats = list(s.execute(select(Statistic).where(Statistic.match_id == uuid.UUID(match_id))).scalars())
         assert len(highlights) == 1
         assert len(stats) == 4
+
+
+def test_player_track_id_persists_for_attributed_highlight_types(sqlite_session, storage_env):
+    """Tier 3b: a smash/save event's player_track_id from highlights.json lands on the Highlight row."""
+    video_id, match_id = _seed_video_with_match(sqlite_session)
+
+    _write_json(storage_env, RALLIES_KEY, _rallies_payload([_rally_dict(1, 10.0)]))
+    _write_json(storage_env, OUTCOMES_KEY, _outcomes_payload([_outcome_dict(1, OUTCOME_NET)]))
+    _write_json(
+        storage_env, HIGHLIGHTS_KEY,
+        {
+            "highlights": [
+                _highlight_event("long_rally"),  # unattributed, per Tier 3a's own scoping call
+                _highlight_event("powerful_smash", score=0.9, player_track_id=7),
+                _highlight_event("spectacular_save", score=0.8, player_track_id=3),
+            ]
+        },
+    )
+
+    payload = {
+        "video_id": video_id, "rally_segments_path": RALLIES_KEY,
+        "point_outcomes_path": OUTCOMES_KEY, "highlights_path": HIGHLIGHTS_KEY,
+    }
+    run_analyze_persistence(payload)
+
+    with sqlite_session() as s:
+        highlights = {
+            h.event_type: h.player_track_id
+            for h in s.execute(select(Highlight).where(Highlight.match_id == uuid.UUID(match_id))).scalars()
+        }
+        assert highlights[HighlightType.LONG_RALLY] is None
+        assert highlights[HighlightType.POWERFUL_SMASH] == 7
+        assert highlights[HighlightType.SPECTACULAR_SAVE] == 3
+
+
+def test_highlight_event_missing_player_track_id_key_defaults_to_none(sqlite_session, storage_env):
+    """
+    Backward compatibility: a highlights.json written before Tier 3a
+    (no "player_track_id" key at all, not even null) must not raise --
+    same "NULL for old rows" posture the Tier 3b migration itself takes
+    for pre-existing Highlight rows.
+    """
+    video_id, match_id = _seed_video_with_match(sqlite_session)
+
+    _write_json(storage_env, RALLIES_KEY, _rallies_payload([_rally_dict(1, 10.0)]))
+    _write_json(storage_env, OUTCOMES_KEY, _outcomes_payload([_outcome_dict(1, OUTCOME_NET)]))
+    pre_tier_3a_event = {
+        "rally_index": 1, "highlight_type": "long_rally",
+        "start_time_s": 0.0, "end_time_s": 20.0,
+        "importance_score": 0.7, "reason": "test", "source_frame_index": None,
+        # no "player_track_id" key at all
+    }
+    _write_json(storage_env, HIGHLIGHTS_KEY, {"highlights": [pre_tier_3a_event]})
+
+    payload = {
+        "video_id": video_id, "rally_segments_path": RALLIES_KEY,
+        "point_outcomes_path": OUTCOMES_KEY, "highlights_path": HIGHLIGHTS_KEY,
+    }
+    run_analyze_persistence(payload)  # must not raise
+
+    with sqlite_session() as s:
+        [highlight] = list(s.execute(select(Highlight).where(Highlight.match_id == uuid.UUID(match_id))).scalars())
+        assert highlight.player_track_id is None
 
 
 def test_missing_highlights_path_raises(sqlite_session, storage_env):

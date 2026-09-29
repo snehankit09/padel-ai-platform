@@ -5,7 +5,7 @@ with type, timestamp, and score.
 
 import uuid
 
-from sqlalchemy import String, ForeignKey, Float, Enum as SAEnum
+from sqlalchemy import String, ForeignKey, Float, Integer, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +38,35 @@ class Highlight(Base, TimestampedBase):
     # unset rather than one succeeding without the other, since both come
     # from the same try/except block in that stage.
     thumbnail_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+
+    # Raw ByteTrack track_id of this event's one natural "owner" shot --
+    # Highlights Improvement Roadmap Tier 3a (ml/pipeline/highlight_tagging.py's
+    # HighlightEvent.player_track_id)/3b (this column). Set only for
+    # POWERFUL_SMASH and SPECTACULAR_SAVE (see that module's own docstring
+    # for why LONG_RALLY/FAST_EXCHANGE never get one). Deliberately NOT a
+    # ForeignKey to app.models.player.Player: a ByteTrack track_id isn't a
+    # stable Player identity anywhere in this codebase yet -- the same gap
+    # app/services/player_statistics_stage.py's own module docstring
+    # already documents for its own track_id-keyed stats (no track_id ->
+    # Player.id mapping exists for an automated pipeline run). Resolving
+    # this raw id to a human-readable label is player_label, below.
+    player_track_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # player_track_id resolved to a human-readable label -- "Player A"
+    # .."Player D", or a "Near Team"/"Far Team" fallback -- via Tier
+    # 2's ml.pipeline.team_side_positions.assign_player_label. Highlights
+    # Improvement Roadmap Tier 3c (app/services/team_side_label_resolution_stage.py):
+    # set in a small UPDATE step at the very end of `analyze`, once BOTH
+    # this row (Part 7f) and team_side_labels.json (Tier 2d) exist --
+    # see that stage's own module docstring for why label resolution
+    # can't happen any earlier in the same run. Stays NULL when
+    # player_track_id is itself NULL (nothing to resolve), and also when
+    # a non-NULL player_track_id has no entry in that run's track_labels
+    # lookup (Tier 1d skipped that track_id entirely -- see
+    # ml.pipeline.team_side_positions.merge_track_fragments' own
+    # docstring for when that happens); either way this stays honestly
+    # unset rather than guessing a label.
+    player_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     match: Mapped["Match"] = relationship(back_populates="highlights")
 

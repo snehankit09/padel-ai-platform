@@ -72,6 +72,8 @@ def test_match_detail_includes_highlights_in_chronological_order(sample_video_pa
                 end_time_seconds=42.0,
                 importance_score=0.75,
                 clip_file_path="clips/x/clip_001.mp4",
+                player_track_id=7,
+                player_label="Player A",
             )
         )
         db.add(
@@ -99,8 +101,39 @@ def test_match_detail_includes_highlights_in_chronological_order(sample_video_pa
 
     long_rally, smash = highlights
     assert long_rally["clip_url"] is None  # no clip_file_path -> no URL
+    assert long_rally["player_label"] is None  # LONG_RALLY is never attributed -- Tier 3a
     assert smash["clip_url"] == "/media/clips/x/clip_001.mp4"
+    assert smash["player_label"] == "Player A"
     assert 0.0 <= smash["importance_score"] <= 1.0
+
+
+def test_match_detail_highlight_player_label_is_null_when_unresolved(sample_video_path: Path):
+    """
+    A track_id can be persisted (Tier 3b) without ever resolving to a
+    label (Tier 3c) -- no calibration that run, or the track_id fell
+    outside Tier 1d's merge. The route surfaces that as plain null, same
+    as any other unresolved field, not a distinct error state.
+    """
+    match_id = _upload_match(sample_video_path)
+
+    with get_sync_db() as db:
+        db.add(
+            Highlight(
+                match_id=match_id,
+                event_type=HighlightType.SPECTACULAR_SAVE,
+                start_time_seconds=5.0,
+                end_time_seconds=7.0,
+                importance_score=0.5,
+                player_track_id=99,
+                player_label=None,
+            )
+        )
+        db.commit()
+
+    response = client.get(f"/matches/{match_id}")
+    assert response.status_code == 200
+    [highlight] = response.json()["highlights"]
+    assert highlight["player_label"] is None
 
 
 def test_match_detail_for_unknown_match_returns_404():

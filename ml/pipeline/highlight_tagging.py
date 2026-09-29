@@ -99,6 +99,22 @@ opinion worth encoding. Bumping a weight without that review would trade
 one unexamined bias (the old floor asymmetry) for a different one that's
 merely harder to notice, not evidence-based just because it's a
 different number.
+
+**player_track_id (Highlights Improvement Roadmap Tier 3a).** Only
+tag_powerful_smash and tag_spectacular_saves set it — the two
+HighlightTypes with one natural single "owner" shot (the smasher; the
+player who made the save, not the player who got smashed at). Threaded
+straight from the already-computed Shot.player_track_id (Part 7c) at
+tagging time; no new detection or re-derivation happens here, same "this
+module only applies rules to already-computed fields" posture the whole
+module docstring already establishes. LONG_RALLY and FAST_EXCHANGE stay
+unattributed (player_track_id=None, the dataclass field's own default) —
+a whole rally or a multi-shot exchange genuinely involves all four
+players, not one; inventing a single "owner" for either would be exactly
+the kind of unsupported guess this module has refused to make everywhere
+else (see WINNING_SHOT/MATCH_POINT/BREAK_POINT above). This is a scoping
+decision, not a limitation waiting on more signal — even with perfect
+tracking, "whose highlight is a long rally" has no single correct answer.
 """
 
 from __future__ import annotations
@@ -224,6 +240,12 @@ class HighlightEvent:
     `source_frame_index` is the single frame the event is anchored to when
     there is one (a shot's contact frame) -- None for whole-rally events
     (LONG_RALLY) that aren't anchored to one specific frame.
+
+    `player_track_id` (Highlights Improvement Roadmap Tier 3a) is the
+    ByteTrack track_id of this event's one natural "owner" shot -- set
+    only by tag_powerful_smash and tag_spectacular_saves, None everywhere
+    else. See module docstring's own Tier 3a section for why LONG_RALLY/
+    FAST_EXCHANGE deliberately never get one.
     """
 
     rally_index: int
@@ -233,6 +255,7 @@ class HighlightEvent:
     importance_score: float
     reason: str
     source_frame_index: int | None = None
+    player_track_id: int | None = None
 
 
 def tag_long_rally(
@@ -241,7 +264,12 @@ def tag_long_rally(
     min_duration_s: float = DEFAULT_LONG_RALLY_MIN_DURATION_S,
     score_saturation_s: float = DEFAULT_LONG_RALLY_SCORE_SATURATION_S,
 ) -> HighlightEvent | None:
-    """None when the rally doesn't clear min_duration_s; otherwise spans the whole rally."""
+    """None when the rally doesn't clear min_duration_s; otherwise spans the whole rally.
+
+    player_track_id stays at the dataclass default (None) -- see module
+    docstring's Tier 3a section for why a whole rally has no single
+    natural "owner" player.
+    """
     if rally.duration_s < min_duration_s:
         return None
 
@@ -286,6 +314,10 @@ def tag_fast_exchanges(
     sorted by frame_index -- this function doesn't filter or sort itself
     (see detect_highlights, which does both once for every tag_* call
     that needs it, rather than each one repeating the same work).
+
+    player_track_id stays at the dataclass default (None) -- same Tier
+    3a scoping call as tag_long_rally: a multi-shot exchange involves
+    every player in the rally, not one.
     """
     if len(shots_in_rally) < min_shot_count:
         return []
@@ -356,6 +388,13 @@ def tag_powerful_smash(
     tag_long_rally and tag_fast_exchanges already use -- see the module
     docstring's "Cross-type score comparability" section for why this
     matters and what changed here (Highlights Improvement Roadmap Tier 2).
+
+    player_track_id (Tier 3a) is shot.player_track_id verbatim -- the
+    smasher IS this event's one natural owner, so there's nothing to
+    derive here, only to carry over. Can itself be None when 7c couldn't
+    resolve which player made contact (see classify_shot's own
+    docstring); this function doesn't treat that specially, it's just
+    whatever Shot already has.
     """
     if shot.shot_type != SHOT_TYPE_SMASH:
         return None
@@ -388,6 +427,7 @@ def tag_powerful_smash(
             f"overhead contact (height_ratio={shot.contact_height_ratio}) classified as a smash"
         ),
         source_frame_index=shot.frame_index,
+        player_track_id=shot.player_track_id,
     )
 
 
@@ -426,6 +466,14 @@ def tag_spectacular_saves(
     threshold, 1 at saturation" convention every tag_* function in this
     module now uses; see the module docstring's "Cross-type score
     comparability" section (Highlights Improvement Roadmap Tier 2).
+
+    player_track_id (Tier 3a) is cur_shot.player_track_id -- the player
+    who MADE the save, not prev_shot's smasher. That's this event's one
+    natural owner: SPECTACULAR_SAVE is a highlight about the return, not
+    about the shot it answered (which already gets its own, separate
+    POWERFUL_SMASH event and its own attribution above). Both
+    player_track_ids are already guaranteed non-None by the check above,
+    so this is never None the way tag_powerful_smash's can be.
     """
     events: list[HighlightEvent] = []
     for prev_shot, cur_shot in zip(shots_in_rally, shots_in_rally[1:]):
@@ -455,6 +503,7 @@ def tag_spectacular_saves(
                     f"smash within {response_s:.2f}s"
                 ),
                 source_frame_index=cur_shot.frame_index,
+                player_track_id=cur_shot.player_track_id,
             )
         )
     return events
@@ -571,6 +620,7 @@ def detect_highlights(
                 ),
                 reason=e.reason,
                 source_frame_index=e.source_frame_index,
+                player_track_id=e.player_track_id,
             )
             for e in events
         ]
@@ -588,13 +638,22 @@ def to_serializable(events: Sequence[HighlightEvent]) -> list[dict]:
             "importance_score": e.importance_score,
             "reason": e.reason,
             "source_frame_index": e.source_frame_index,
+            "player_track_id": e.player_track_id,
         }
         for e in events
     ]
 
 
 def summarize_highlights(events: Sequence[HighlightEvent]) -> dict:
-    """Same "summary alongside raw data" pattern as every other Part 5-7 stage."""
+    """
+    Same "summary alongside raw data" pattern as every other Part 5-7
+    stage. attributed_count (Tier 3a) is how many events carry a real
+    player_track_id -- structurally capped at however many
+    POWERFUL_SMASH/SPECTACULAR_SAVE events this match produced (see
+    module docstring's Tier 3a section for why LONG_RALLY/FAST_EXCHANGE
+    never contribute to it), so a low count relative to highlight_count
+    reflects that scoping choice, not a signal something's broken.
+    """
     total = len(events)
     by_type: dict[str, int] = {
         HIGHLIGHT_TYPE_LONG_RALLY: 0,
@@ -608,4 +667,5 @@ def summarize_highlights(events: Sequence[HighlightEvent]) -> dict:
         "highlight_count": total,
         "highlight_counts_by_type": by_type,
         "avg_importance_score": (sum(e.importance_score for e in events) / total) if total else 0.0,
+        "attributed_count": sum(1 for e in events if e.player_track_id is not None),
     }

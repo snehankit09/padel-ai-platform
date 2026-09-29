@@ -81,6 +81,15 @@ export type HighlightType =
 // independently of clip_url — a clip can have one set without the other,
 // since thumbnail extraction is a soft failure server-side (see
 // HighlightItem's own docstring in schemas/match.py).
+//
+// player_label — Highlights Improvement Roadmap Tier 4a — a plain display
+// string ("Player A", "Near Team"), already resolved server-side, not a
+// storage path. Null for more than one honest reason (see that schema's
+// own docstring): long_rally/fast_exchange are never attributed at all,
+// and even an attributed powerful_smash/spectacular_save stays null
+// below the resolution step's confidence threshold. This type doesn't
+// distinguish those cases, same as the response itself — a viewer
+// doesn't need to know WHY a label is missing, only that it is.
 export interface HighlightItem {
   id: string;
   event_type: HighlightType;
@@ -89,6 +98,7 @@ export interface HighlightItem {
   importance_score: number;
   clip_url: string | null;
   thumbnail_url: string | null;
+  player_label: string | null;
 }
 
 // Mirrors app/schemas/match.py's MatchDetailResponse — GET /matches/{id}.

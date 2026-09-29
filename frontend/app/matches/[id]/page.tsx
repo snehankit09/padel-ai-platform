@@ -394,6 +394,21 @@ function HighlightsSection({
   highlights: HighlightItem[];
   videoStatus: MatchDetailResponse["video_status"];
 }) {
+  // Tier 4c, on top of 4b's badge: distinct player_label values actually
+  // present on this match's highlights, sorted for a stable dropdown
+  // order. Derived from `highlights` on every render rather than stored
+  // in state — it's a projection of props, not independent UI state, so
+  // there's nothing to keep in sync. Empty whenever nothing on this
+  // match cleared 4b's null cases (no attributed type, or none of them
+  // resolved a label), which is the common case for older matches
+  // processed before Tier 3c — the filter control itself is skipped
+  // then rather than showing a dropdown with only "All players" in it.
+  const playerLabels = Array.from(
+    new Set(highlights.map((highlight) => highlight.player_label).filter((label): label is string => label !== null))
+  ).sort((a, b) => a.localeCompare(b));
+
+  const [selectedPlayer, setSelectedPlayer] = useState<string | null>(null);
+
   if (highlights.length === 0) {
     const message =
       videoStatus === "done" || videoStatus === null
@@ -402,14 +417,43 @@ function HighlightsSection({
     return <p className="status-detail">{message}</p>;
   }
 
+  // selectedPlayer surviving a value no longer in playerLabels (e.g. the
+  // underlying highlights prop changed under it) would silently filter
+  // everything out with no visible cause — fall back to "All players"
+  // instead of trusting stale state.
+  const activePlayer = selectedPlayer !== null && playerLabels.includes(selectedPlayer) ? selectedPlayer : null;
+  const visibleHighlights = activePlayer === null ? highlights : highlights.filter((h) => h.player_label === activePlayer);
+
   return (
-    <ul className="highlight-grid">
-      {highlights.map((highlight) => (
-        <li key={highlight.id}>
-          <HighlightCard highlight={highlight} />
-        </li>
-      ))}
-    </ul>
+    <>
+      {playerLabels.length > 0 ? (
+        <div className="highlight-filter">
+          <label className="field-label" htmlFor="highlight-player-filter">
+            Filter by player
+          </label>
+          <select
+            id="highlight-player-filter"
+            value={activePlayer ?? "all"}
+            onChange={(event) => setSelectedPlayer(event.target.value === "all" ? null : event.target.value)}
+          >
+            <option value="all">All players</option>
+            {playerLabels.map((label) => (
+              <option key={label} value={label}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+
+      <ul className="highlight-grid">
+        {visibleHighlights.map((highlight) => (
+          <li key={highlight.id}>
+            <HighlightCard highlight={highlight} />
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -435,7 +479,18 @@ function HighlightCard({ highlight }: { highlight: HighlightItem }) {
       </div>
       <div className="highlight-card-body">
         <div className="highlight-card-heading">
-          <span className="highlight-type-tag">{highlightTypeLabel(highlight.event_type)}</span>
+          <span className="highlight-card-heading-left">
+            <span className="highlight-type-tag">{highlightTypeLabel(highlight.event_type)}</span>
+            {highlight.player_label ? (
+              // Only ever non-null for attributed types (powerful_smash /
+              // spectacular_save) that cleared the resolution step's
+              // confidence threshold — see HighlightItem's own docstring
+              // in lib/types.ts. Everything else (rally/exchange types,
+              // or an attributed one that didn't clear the threshold)
+              // renders nothing here, not a placeholder.
+              <span className="player-label-badge">{highlight.player_label}</span>
+            ) : null}
+          </span>
           <span className="highlight-card-time">
             {formatTimestamp(highlight.start_time_seconds)}–{formatTimestamp(highlight.end_time_seconds)}
           </span>

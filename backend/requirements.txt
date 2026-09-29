@@ -24,6 +24,7 @@ ffmpeg-python==0.2.0
 # Only needed by the `worker` container (ml/ isn't mounted into `backend`,
 # see app/core/ml_path.py), but kept in this shared requirements.txt since
 # both containers build from the same Dockerfile/image today.
+--extra-index-url https://download.pytorch.org/whl/cpu
 ultralytics==8.3.28   # YOLO model loading + inference
 numpy==1.26.4
 scipy==1.14.1          # linear_sum_assignment (Hungarian algorithm) — ml/tracking/byte_tracker.py

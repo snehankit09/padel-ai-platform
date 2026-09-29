@@ -82,6 +82,19 @@ class HighlightItem(BaseModel):
     take the clip down with it), never the other way around. Not to be
     confused with MatchListItem.thumbnail_url above, a different field on
     a different, match-level (not per-clip) response shape.
+
+    player_label — Highlights Improvement Roadmap Tier 4a — a straight
+    passthrough of Highlight.player_label (Tier 3c), unlike clip_url/
+    thumbnail_url: it's already a plain display string ("Player A",
+    "Near Team"), not a storage path, so there's no storage.get_url() to
+    apply below. Null for more than one honest reason, same as those two
+    fields: LONG_RALLY/FAST_EXCHANGE are never attributed at all (Tier
+    3a's own scoping call — see ml/pipeline/highlight_tagging.py), and
+    even an attributed POWERFUL_SMASH/SPECTACULAR_SAVE stays null when
+    this match had no usable court calibration that run (Tier 2d) or its
+    track_id fell outside Tier 1d's merge (Tier 3c's own docstring). The
+    route doesn't distinguish these cases in the response — a viewer
+    doesn't need to know WHY a label is missing, only that it is.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -93,6 +106,7 @@ class HighlightItem(BaseModel):
     importance_score: float
     clip_url: str | None
     thumbnail_url: str | None
+    player_label: str | None
 
 
 class MatchDetailResponse(BaseModel):
